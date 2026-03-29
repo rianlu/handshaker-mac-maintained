@@ -1,10 +1,20 @@
-![HandShaker Mac Maintained Logo](ic_launcher.png)
+<div align="center">
+  <img src="./ic_launcher.png" alt="HandShaker Mac Maintained Logo" width="124" height="124" />
 
-# HandShaker Mac Maintained
+  <h1>HandShaker Mac Maintained</h1>
 
-面向现代 macOS 的 HandShaker 非官方维护版
+  <p><strong>面向现代 macOS 的 HandShaker 非官方维护版</strong></p>
+  <p>在尽量保留原有连接体验的基础上，修复原版 HandShaker 在新版 macOS 上连接后卡死、内存暴涨与无法稳定使用的问题。</p>
 
-在尽量保留原有连接体验的基础上，修复原版 HandShaker 在新版 macOS 上连接后卡死、内存暴涨与无法稳定使用的问题。
+  <p>
+    <a href="https://github.com/rianlu/handshaker-mac-maintained/releases/latest">
+      <img alt="Release" src="https://img.shields.io/github/v/release/rianlu/handshaker-mac-maintained?display_name=tag&style=for-the-badge" />
+    </a>
+    <img alt="macOS 15" src="https://img.shields.io/badge/macOS-15%20Tested-1E88E5?style=for-the-badge" />
+    <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-Tested-111111?style=for-the-badge" />
+    <img alt="Rosetta 2" src="https://img.shields.io/badge/Rosetta%202-Required-9E9E9E?style=for-the-badge" />
+  </p>
+</div>
 
 > [!IMPORTANT]
 > 本仓库是 HandShaker macOS 客户端的非官方维护项目，与原厂无官方关联。仓库内容主要用于个人学习、兼容性分析、逆向修复与非商业研究。详细技术过程可见 [修复报告](docs/HandShaker%20%28Mac%E7%AB%AF%29%20%E8%BF%9E%E6%8E%A5%E5%8D%A1%E6%AD%BB%E4%B8%8E%E5%86%85%E5%AD%98%E6%B3%84%E6%BC%8F%E4%BF%AE%E5%A4%8D%E6%8A%A5%E5%91%8A.md)。
@@ -15,7 +25,15 @@
 
 ## 截图预览
 
-![截图预览](assets/readme/截图预览.png)
+<table>
+  <tr>
+    <td align="center">
+      <img src="./assets/readme/截图预览.png" alt="Screenshot preview" width="720" />
+      <br />
+      <strong>修复后的 macOS 端连接与浏览界面</strong>
+    </td>
+  </tr>
+</table>
 
 ## 项目亮点
 
@@ -35,7 +53,7 @@
 
 - macOS 15
 - Apple Silicon
-- 通过 Rosetta 2 运行原始 x86_64 HandShaker
+- 原版 HandShaker 为 Intel 版本，在 Apple Silicon Mac 上通过 Rosetta 2 运行
 
 > [!NOTE]
 > 当前仓库明确实测的是以上环境。其他 macOS 版本、Intel Mac、不同系统安全策略下的表现可能存在差异，请不要默认视为全版本完全一致。
@@ -55,6 +73,14 @@
 
 1. 在 Finder 中右键应用，选择“打开”
 2. 若仍被拦截，前往“系统设置 > 隐私与安全性”，选择“仍要打开”或等效放行选项
+
+## 已修复问题
+
+- 连接设备后数十秒内稳定卡死
+- 主线程转彩球并失去响应
+- 内存占用持续上涨，最终导致 OOM 或拖死系统
+- “本地同步选项”旧界面触发的异常加载链路
+- 文件浏览、图片预览和视频预览等核心功能不可稳定使用的问题
 
 ## 修复说明
 
@@ -98,6 +124,13 @@
 ```sh
 sh ./build.sh
 ```
+
+### Release 版本维护
+
+- 版本入口统一在 `release.conf`
+- 修改 `RELEASE_SUFFIX` 和 `RELEASE_BUILD_NUMBER` 后，再运行 `sh ./build.sh`
+- 维护版版本号会自动写入 app 的 `CFBundleShortVersionString` 和 `CFBundleVersion`
+- DMG 构建产物会输出到 `build/`
 
 ### 依赖
 
