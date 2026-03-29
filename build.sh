@@ -14,6 +14,25 @@ require_file() {
   [ -f "$1" ] || fail "missing required file: $1"
 }
 
+detect_release_arch() {
+  local executable_path="${APP_TEMPLATE_DIR}/Contents/MacOS/HandShaker"
+  local archs
+
+  require_file "${executable_path}"
+  archs="$(lipo -archs "${executable_path}" 2>/dev/null)" || fail "failed to read binary architecture: ${executable_path}"
+
+  case "${archs}" in
+    "x86_64 arm64"|"arm64 x86_64")
+      RELEASE_ARCH_NAME="universal"
+      ;;
+    *)
+      RELEASE_ARCH_NAME="${archs// /-}"
+      ;;
+  esac
+
+  [ -n "${RELEASE_ARCH_NAME}" ] || fail "resolved empty architecture name"
+}
+
 load_release_config() {
   require_file "${RELEASE_CONFIG_FILE}"
   # shellcheck disable=SC1090
@@ -34,7 +53,8 @@ load_release_config() {
     RELEASE_VERSION_NAME="${RELEASE_BASE_VERSION}"
   fi
 
-  RELEASE_DMG_NAME="HandShaker-Mac-Maintained-v${RELEASE_VERSION_NAME}.dmg"
+  detect_release_arch
+  RELEASE_DMG_NAME="handshaker-mac-maintained-${RELEASE_VERSION_NAME}-${RELEASE_ARCH_NAME}.dmg"
 }
 
 apply_release_version() {
@@ -81,5 +101,6 @@ create-dmg \
   "${BUILD_DIR}/"
 
 echo "版本号: ${RELEASE_VERSION_NAME} (${RELEASE_BUILD_NUMBER})"
+echo "架构: ${RELEASE_ARCH_NAME}"
 echo "DMG: ${BUILD_DIR}/${RELEASE_DMG_NAME}"
 echo "✅ 像素级完全复刻打包完成！"
