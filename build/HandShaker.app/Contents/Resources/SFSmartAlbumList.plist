@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>paths</key>
+	<array>
+		<string>/ROOT__DIR/DCIM/Camera</string>
+		<string>/ROOT__DIR/Pictures/Screenshots</string>
+	</array>
+	<key>icons</key>
+	<array>
+		<string>trashIcon</string>
+		<string>trashIcon</string>
+	</array>
+</dict>
+</plist>
