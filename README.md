@@ -141,6 +141,12 @@ sh ./build.sh
 - `create-dmg`
 - Hopper Disassembler
 
+## 友情链接
+
+- [LINUX DO](https://linux.do/)
+
+社区文化：真诚、友善、团结、专业，共建你我引以为荣之社区。
+
 ## 版权与免责声明
 
 - 原始应用及相关商标、名称、资源和版权归原权利人所有
