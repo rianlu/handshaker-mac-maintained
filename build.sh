@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -u
+
 APP_TEMPLATE_DIR="App_Template"
 BUILD_DIR="build"
 DMG_ASSETS_DIR="assets/dmg"
@@ -12,6 +14,10 @@ fail() {
 
 require_file() {
   [ -f "$1" ] || fail "missing required file: $1"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
 detect_release_arch() {
@@ -66,6 +72,10 @@ apply_release_version() {
 
 load_release_config
 
+require_command codesign
+require_command create-dmg
+require_command lipo
+
 # 1. 准备空壳
 echo "🚀 开始组装 HandShaker.app..."
 rm -rf "${BUILD_DIR}/HandShaker.app"
@@ -85,6 +95,8 @@ codesign --force --deep --sign - "${BUILD_DIR}/HandShaker.app"
 # 4. 像素级完全复刻打包模式
 echo "📦 正在生成工业级 DMG 安装包..."
 
+rm -f "${BUILD_DIR}/${RELEASE_DMG_NAME}"
+
 create-dmg \
   --volname "HandShaker" \
   --background "${DMG_ASSETS_DIR}/backgroundImage@2x.jpg" \
@@ -99,6 +111,8 @@ create-dmg \
   --icon ".VolumeIcon.icns" 450 550 \
   "${BUILD_DIR}/${RELEASE_DMG_NAME}" \
   "${BUILD_DIR}/"
+
+[ -f "${BUILD_DIR}/${RELEASE_DMG_NAME}" ] || fail "dmg packaging did not produce ${BUILD_DIR}/${RELEASE_DMG_NAME}"
 
 echo "版本号: ${RELEASE_VERSION_NAME} (${RELEASE_BUILD_NUMBER})"
 echo "架构: ${RELEASE_ARCH_NAME}"
