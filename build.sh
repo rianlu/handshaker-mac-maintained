@@ -6,6 +6,7 @@ APP_TEMPLATE_DIR="App_Template"
 BUILD_DIR="build"
 DMG_ASSETS_DIR="assets/dmg"
 RELEASE_CONFIG_FILE="./release.conf"
+SMARTFINDER_CORE_PATCH_SCRIPT="./patches/build_smartfinder_core_wrapper.sh"
 
 fail() {
   printf '%s\n' "FAIL: $1" >&2
@@ -75,6 +76,11 @@ load_release_config
 require_command codesign
 require_command create-dmg
 require_command lipo
+
+if [ -f "${SMARTFINDER_CORE_PATCH_SCRIPT}" ]; then
+  echo "🧩 正在应用 SmartFinderCore 运行时补丁..."
+  sh "${SMARTFINDER_CORE_PATCH_SCRIPT}"
+fi
 
 # 1. 准备空壳
 echo "🚀 开始组装 HandShaker.app..."
