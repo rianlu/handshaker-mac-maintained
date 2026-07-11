@@ -2,6 +2,8 @@
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <limits.h>
+#import <signal.h>
 
 typedef void (*HSParserIMP)(id, SEL, id);
 typedef void (*HSReloadIMP)(id, SEL, BOOL, id);
@@ -9,6 +11,8 @@ typedef void (*HSObjectSetterIMP)(id, SEL, id);
 typedef void (*HSVMsgSend)(id, SEL);
 typedef id (*HSInitMsgSend)(id, SEL);
 typedef id (*HSIdLongLongMsgSend)(id, SEL, long long);
+typedef void (*HSSetMaskIMP)(id, SEL, NSUInteger);
+typedef id (*HSUSBHandshakeIMP)(id, SEL, int);
 
 @interface HSPreparedPhotoImageBox : NSObject
 @property(nonatomic) NSSize targetSize;
@@ -19,12 +23,25 @@ typedef id (*HSIdLongLongMsgSend)(id, SEL, long long);
 @implementation HSPreparedPhotoImageBox
 @end
 
+@interface HSPhotoCacheFileEntry : NSObject
+@property(nonatomic, copy) NSString *path;
+@property(nonatomic) unsigned long long size;
+@property(nonatomic, strong) NSDate *date;
+@end
+
+@implementation HSPhotoCacheFileEntry
+@end
+
 static HSParserIMP HSOriginalParser = NULL;
 static HSReloadIMP HSOriginalReload = NULL;
 static HSVMsgSend HSOriginalReloadGrid = NULL;
 static HSObjectSetterIMP HSOriginalSetImage = NULL;
 static HSInitMsgSend HSOriginalPhotoItemInit = NULL;
 static HSObjectSetterIMP HSOriginalSetRepresentedObject = NULL;
+static HSVMsgSend HSOriginalFRLogAsking = NULL;
+static HSSetMaskIMP HSOriginalSetExceptionHandlingMask = NULL;
+static HSSetMaskIMP HSOriginalSetExceptionHangingMask = NULL;
+static HSUSBHandshakeIMP HSOriginalUSBHandshake = NULL;
 static __weak id HSLastPhotoViewController = nil;
 static char HSPreparedPhotoImageKey;
 static char HSPhotoLoadingOverlayKey;
@@ -33,13 +50,27 @@ static char HSPhotoLibraryParseTokenKey;
 static char HSPhotoItemLastImageKey;
 static char HSPhotoItemConfiguredKey;
 static dispatch_queue_t HSPhotoParserQueue;
+static dispatch_queue_t HSPhotoCacheCleanupQueue;
 static NSUInteger HSPhotoLibraryParseGeneration = 0;
+static BOOL HSPhotoCacheCleanupScheduled = NO;
 static BOOL HSSwizzledParser = NO;
 static BOOL HSSwizzledReload = NO;
 static BOOL HSSwizzledReloadGrid = NO;
 static BOOL HSSwizzledPhotoItemImageSetter = NO;
 static BOOL HSSwizzledPhotoItemLifecycle = NO;
+static BOOL HSSwizzledFRLogAsking = NO;
+static BOOL HSSwizzledExceptionHandlerMasks = NO;
+static BOOL HSSwizzledUSBHandshake = NO;
+static BOOL HSRegisteredLegacyPromptDefaults = NO;
 static BOOL HSLoggedInstall = NO;
+static BOOL HSDiagnosticsLogged = NO;
+
+static const unsigned long long HSPhotoCacheDefaultMaxBytes = 1024ULL * 1024ULL * 1024ULL;
+static const unsigned long long HSPhotoCacheDefaultTargetBytes = 768ULL * 1024ULL * 1024ULL;
+static const unsigned long long HSPhotoCacheLowDiskMaxBytes = 512ULL * 1024ULL * 1024ULL;
+static const unsigned long long HSPhotoCacheLowDiskTargetBytes = 384ULL * 1024ULL * 1024ULL;
+static const unsigned long long HSPhotoCacheLowDiskFreeBytes = 10ULL * 1024ULL * 1024ULL * 1024ULL;
+static const int HSUSBHandshakeTimeoutMilliseconds = 15000;
 
 static void HSCallIfResponds(id target, SEL selector) {
     if (target && [target respondsToSelector:selector]) {
@@ -104,6 +135,230 @@ static id HSAlbumForAlbumId(id albums, long long albumId) {
 static BOOL HSIsAlbumsViewModel(id model) {
     Class albumsClass = NSClassFromString(@"SFPhotoAlbumsViewModel");
     return albumsClass && model && [model isKindOfClass:albumsClass];
+}
+
+static NSString *HSHandShakerApplicationSupportPath(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+    NSString *basePath = paths.firstObject;
+    return basePath.length ? [basePath stringByAppendingPathComponent:@"HandShaker"] : nil;
+}
+
+static NSString *HSPhotoThumbnailCachePath(void) {
+    return [[HSHandShakerApplicationSupportPath() stringByAppendingPathComponent:@"thumbnails"] stringByStandardizingPath];
+}
+
+static unsigned long long HSDirectorySizeAtPath(NSString *path) {
+    if (!path.length) {
+        return 0;
+    }
+
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    BOOL isDirectory = NO;
+    if (![fileManager fileExistsAtPath:path isDirectory:&isDirectory]) {
+        return 0;
+    }
+
+    if (!isDirectory) {
+        NSDictionary *attributes = [fileManager attributesOfItemAtPath:path error:nil];
+        return [[attributes objectForKey:NSFileSize] unsignedLongLongValue];
+    }
+
+    unsigned long long total = 0;
+    NSDirectoryEnumerator *enumerator = [fileManager enumeratorAtURL:[NSURL fileURLWithPath:path isDirectory:YES]
+                                         includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLTotalFileAllocatedSizeKey, NSURLFileSizeKey]
+                                                            options:NSDirectoryEnumerationSkipsHiddenFiles
+                                                       errorHandler:^BOOL(__unused NSURL *url, __unused NSError *error) {
+        return YES;
+    }];
+
+    for (NSURL *url in enumerator) {
+        NSNumber *isRegularFile = nil;
+        if (![url getResourceValue:&isRegularFile forKey:NSURLIsRegularFileKey error:nil] || ![isRegularFile boolValue]) {
+            continue;
+        }
+
+        NSNumber *fileSize = nil;
+        if (![url getResourceValue:&fileSize forKey:NSURLTotalFileAllocatedSizeKey error:nil] || !fileSize) {
+            [url getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+        }
+        total += [fileSize unsignedLongLongValue];
+    }
+
+    return total;
+}
+
+static unsigned long long HSFreeBytesForPath(NSString *path) {
+    if (!path.length) {
+        return ULLONG_MAX;
+    }
+
+    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfFileSystemForPath:path error:nil];
+    NSNumber *freeSize = [attributes objectForKey:NSFileSystemFreeSize];
+    return freeSize ? [freeSize unsignedLongLongValue] : ULLONG_MAX;
+}
+
+static void HSLogRuntimeDiagnostics(void) {
+    if (HSDiagnosticsLogged) {
+        return;
+    }
+    HSDiagnosticsLogged = YES;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @autoreleasepool {
+            @try {
+                NSProcessInfo *processInfo = [NSProcessInfo processInfo];
+                NSString *supportPath = HSHandShakerApplicationSupportPath();
+                NSString *thumbnailPath = HSPhotoThumbnailCachePath();
+                NSString *deviceCachePath = [supportPath stringByAppendingPathComponent:@"DeviceCache"];
+                NSLog(@"[HandShakerMaintained] Runtime diagnostics pid=%d os=%@ app=%@ support=%@ thumbnails=%lluMB deviceCache=%lluMB",
+                      processInfo.processIdentifier,
+                      processInfo.operatingSystemVersionString,
+                      [[NSBundle mainBundle] bundlePath],
+                      supportPath ?: @"",
+                      HSDirectorySizeAtPath(thumbnailPath) / 1024ULL / 1024ULL,
+                      HSDirectorySizeAtPath(deviceCachePath) / 1024ULL / 1024ULL);
+            } @catch (NSException *exception) {
+                NSLog(@"[HandShakerMaintained] Runtime diagnostics failed: %@", exception);
+            }
+        }
+    });
+}
+
+static void HSRemoveEmptyDirectoriesAtPath(NSString *rootPath) {
+    if (!rootPath.length) {
+        return;
+    }
+
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSDirectoryEnumerator *enumerator = [fileManager enumeratorAtURL:[NSURL fileURLWithPath:rootPath isDirectory:YES]
+                                         includingPropertiesForKeys:@[NSURLIsDirectoryKey]
+                                                            options:NSDirectoryEnumerationSkipsHiddenFiles
+                                                       errorHandler:^BOOL(__unused NSURL *url, __unused NSError *error) {
+        return YES;
+    }];
+
+    NSMutableArray *directories = [NSMutableArray array];
+    for (NSURL *url in enumerator) {
+        NSNumber *isDirectory = nil;
+        if ([url getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil] && [isDirectory boolValue]) {
+            [directories addObject:url.path];
+        }
+    }
+
+    for (NSString *path in [directories reverseObjectEnumerator]) {
+        NSArray *children = [fileManager contentsOfDirectoryAtPath:path error:nil];
+        if (children && children.count == 0) {
+            [fileManager removeItemAtPath:path error:nil];
+        }
+    }
+}
+
+static void HSCleanupPhotoThumbnailCache(NSString *reason) {
+    @autoreleasepool {
+        NSString *cachePath = HSPhotoThumbnailCachePath();
+        if (!cachePath.length) {
+            return;
+        }
+
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        BOOL isDirectory = NO;
+        if (![fileManager fileExistsAtPath:cachePath isDirectory:&isDirectory] || !isDirectory) {
+            return;
+        }
+
+        unsigned long long freeBytes = HSFreeBytesForPath(cachePath);
+        unsigned long long maxBytes = freeBytes < HSPhotoCacheLowDiskFreeBytes ? HSPhotoCacheLowDiskMaxBytes : HSPhotoCacheDefaultMaxBytes;
+        unsigned long long targetBytes = freeBytes < HSPhotoCacheLowDiskFreeBytes ? HSPhotoCacheLowDiskTargetBytes : HSPhotoCacheDefaultTargetBytes;
+        unsigned long long totalBytes = 0;
+        NSMutableArray<HSPhotoCacheFileEntry *> *files = [NSMutableArray array];
+
+        NSDirectoryEnumerator *enumerator = [fileManager enumeratorAtURL:[NSURL fileURLWithPath:cachePath isDirectory:YES]
+                                             includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLTotalFileAllocatedSizeKey, NSURLFileSizeKey, NSURLContentModificationDateKey]
+                                                                options:NSDirectoryEnumerationSkipsHiddenFiles
+                                                           errorHandler:^BOOL(__unused NSURL *url, __unused NSError *error) {
+            return YES;
+        }];
+
+        for (NSURL *url in enumerator) {
+            NSNumber *isRegularFile = nil;
+            if (![url getResourceValue:&isRegularFile forKey:NSURLIsRegularFileKey error:nil] || ![isRegularFile boolValue]) {
+                continue;
+            }
+
+            NSNumber *fileSize = nil;
+            if (![url getResourceValue:&fileSize forKey:NSURLTotalFileAllocatedSizeKey error:nil] || !fileSize) {
+                [url getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+            }
+
+            HSPhotoCacheFileEntry *entry = [HSPhotoCacheFileEntry new];
+            entry.path = url.path;
+            entry.size = [fileSize unsignedLongLongValue];
+            NSDate *date = nil;
+            [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
+            entry.date = date ?: [NSDate distantPast];
+            totalBytes += entry.size;
+            [files addObject:entry];
+        }
+
+        unsigned long long deviceCacheBytes = HSDirectorySizeAtPath([HSHandShakerApplicationSupportPath() stringByAppendingPathComponent:@"DeviceCache"]);
+        NSLog(@"[HandShakerMaintained] Photo cache scan reason=%@ thumbnails=%lluMB files=%lu deviceCache=%lluMB free=%lluMB limit=%lluMB",
+              reason ?: @"unknown",
+              totalBytes / 1024ULL / 1024ULL,
+              (unsigned long)files.count,
+              deviceCacheBytes / 1024ULL / 1024ULL,
+              freeBytes == ULLONG_MAX ? 0 : freeBytes / 1024ULL / 1024ULL,
+              maxBytes / 1024ULL / 1024ULL);
+
+        if (totalBytes <= maxBytes) {
+            return;
+        }
+
+        [files sortUsingComparator:^NSComparisonResult(HSPhotoCacheFileEntry *first, HSPhotoCacheFileEntry *second) {
+            return [first.date compare:second.date];
+        }];
+
+        unsigned long long removedBytes = 0;
+        NSUInteger removedCount = 0;
+        for (HSPhotoCacheFileEntry *entry in files) {
+            if (totalBytes <= targetBytes) {
+                break;
+            }
+
+            if ([fileManager removeItemAtPath:entry.path error:nil]) {
+                totalBytes = totalBytes > entry.size ? totalBytes - entry.size : 0;
+                removedBytes += entry.size;
+                removedCount += 1;
+            }
+        }
+
+        HSRemoveEmptyDirectoriesAtPath(cachePath);
+        NSLog(@"[HandShakerMaintained] Photo cache cleanup removed=%lluMB files=%lu remaining=%lluMB target=%lluMB",
+              removedBytes / 1024ULL / 1024ULL,
+              (unsigned long)removedCount,
+              totalBytes / 1024ULL / 1024ULL,
+              targetBytes / 1024ULL / 1024ULL);
+    }
+}
+
+static void HSSchedulePhotoCacheCleanup(NSString *reason) {
+    if (!HSPhotoCacheCleanupQueue) {
+        HSPhotoCacheCleanupQueue = dispatch_queue_create("com.handshaker.maintained.photo-cache-cleanup", DISPATCH_QUEUE_SERIAL);
+    }
+
+    @synchronized ([NSApplication class]) {
+        if (HSPhotoCacheCleanupScheduled) {
+            return;
+        }
+        HSPhotoCacheCleanupScheduled = YES;
+    }
+
+    NSString *cleanupReason = [reason copy];
+    dispatch_async(HSPhotoCacheCleanupQueue, ^{
+        HSCleanupPhotoThumbnailCache(cleanupReason);
+        @synchronized ([NSApplication class]) {
+            HSPhotoCacheCleanupScheduled = NO;
+        }
+    });
 }
 
 static void HSRestorePhotoSelectionAfterParse(id controller) {
@@ -368,6 +623,12 @@ static void HSParserPhotoLibraryData(id self, SEL _cmd, id photoLibraryData) {
     id parserData = photoLibraryData;
     id controller = HSLastPhotoViewController;
     NSUInteger token = HSNextPhotoLibraryParseToken();
+    NSDate *parseStart = [NSDate date];
+    NSLog(@"[HandShakerMaintained] Photo library parse scheduled token=%lu parser=%@ data=%@ controller=%@",
+          (unsigned long)token,
+          NSStringFromClass([parserTarget class]),
+          NSStringFromClass([parserData class]),
+          controller ? NSStringFromClass([controller class]) : @"");
     if (controller) {
         objc_setAssociatedObject(controller, &HSPhotoLibraryParsingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(controller, &HSPhotoLibraryParseTokenKey, @(token), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -384,12 +645,18 @@ static void HSParserPhotoLibraryData(id self, SEL _cmd, id photoLibraryData) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     NSNumber *currentToken = controller ? objc_getAssociatedObject(controller, &HSPhotoLibraryParseTokenKey) : nil;
                     if (!currentToken || [currentToken unsignedIntegerValue] == token) {
+                        NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:parseStart];
+                        NSLog(@"[HandShakerMaintained] Photo library parse finished token=%lu elapsed=%.3fs controller=%@",
+                              (unsigned long)token,
+                              elapsed,
+                              controller ? NSStringFromClass([controller class]) : @"");
                         HSRefreshPhotoViewController(controller);
                         if (controller) {
                             objc_setAssociatedObject(controller, &HSPhotoLibraryParsingKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                             objc_setAssociatedObject(controller, &HSPhotoLibraryParseTokenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                         }
                         HSUpdatePhotoLoading(controller);
+                        HSSchedulePhotoCacheCleanup(@"photo-library-parsed");
                     }
                 });
             }
@@ -399,6 +666,10 @@ static void HSParserPhotoLibraryData(id self, SEL _cmd, id photoLibraryData) {
 
 static void HSReloadDataFromDevice(id self, SEL _cmd, BOOL ignoreCache, id completion) {
     HSLastPhotoViewController = self;
+    NSLog(@"[HandShakerMaintained] Photo reload requested controller=%@ ignoreCache=%d completion=%@",
+          NSStringFromClass([self class]),
+          ignoreCache,
+          completion ? NSStringFromClass([completion class]) : @"");
 
     if (HSOriginalReload) {
         HSOriginalReload(self, _cmd, ignoreCache, completion);
@@ -457,6 +728,32 @@ static BOOL HSSwizzleInstanceMethodOnce(Class cls, SEL selector, IMP replacement
     return HSSwizzleInstanceMethod(cls, selector, replacement, original);
 }
 
+static id HSSendUSBHandshake(id self, SEL _cmd, int timeout) {
+    int effectiveTimeout = timeout > 0 ? timeout : HSUSBHandshakeTimeoutMilliseconds;
+    CFAbsoluteTime startedAt = CFAbsoluteTimeGetCurrent();
+    NSLog(@"[HandShakerMaintained] USB handshake started requestedTimeout=%d effectiveTimeout=%d", timeout, effectiveTimeout);
+    id result = HSOriginalUSBHandshake ? HSOriginalUSBHandshake(self, _cmd, effectiveTimeout) : nil;
+    NSLog(@"[HandShakerMaintained] USB handshake finished elapsed=%.3fs result=%@",
+          CFAbsoluteTimeGetCurrent() - startedAt,
+          result);
+    return result;
+}
+
+static void HSInstallUSBHandshakePatch(void) {
+    Class deviceClass = NSClassFromString(@"SFUSBDevice");
+    if (!deviceClass || HSSwizzledUSBHandshake) {
+        return;
+    }
+
+    HSSwizzledUSBHandshake = HSSwizzleInstanceMethodOnce(deviceClass,
+                                                         NSSelectorFromString(@"sendHandShakeRequestWithMSTimeout:"),
+                                                         (IMP)HSSendUSBHandshake,
+                                                         (IMP *)&HSOriginalUSBHandshake);
+    if (HSSwizzledUSBHandshake) {
+        NSLog(@"[HandShakerMaintained] USB handshake timeout patch installed timeout=%dms", HSUSBHandshakeTimeoutMilliseconds);
+    }
+}
+
 static void HSInstallPhotoItemRenderPatch(void) {
     Class itemClass = NSClassFromString(@"SFPhotoItemView");
     if (!itemClass) {
@@ -484,49 +781,174 @@ static void HSInstallPhotoItemRenderPatch(void) {
 }
 
 static void HSInstallPhotoLibraryAsyncPatch(void) {
-    if (!HSPhotoParserQueue) {
-        HSPhotoParserQueue = dispatch_queue_create("com.handshaker.maintained.photo-library-parser", DISPATCH_QUEUE_SERIAL);
+    @try {
+        if (!HSPhotoParserQueue) {
+            HSPhotoParserQueue = dispatch_queue_create("com.handshaker.maintained.photo-library-parser", DISPATCH_QUEUE_SERIAL);
+        }
+        if (!HSPhotoCacheCleanupQueue) {
+            HSPhotoCacheCleanupQueue = dispatch_queue_create("com.handshaker.maintained.photo-cache-cleanup", DISPATCH_QUEUE_SERIAL);
+        }
+
+        Class albumsClass = NSClassFromString(@"SFPhotoAlbumsViewModel");
+        if (albumsClass && !HSSwizzledParser) {
+            HSSwizzledParser = HSSwizzleInstanceMethod(albumsClass,
+                                                       NSSelectorFromString(@"parserPhotoLibraryData:"),
+                                                       (IMP)HSParserPhotoLibraryData,
+                                                       (IMP *)&HSOriginalParser);
+        }
+
+        Class photoViewControllerClass = NSClassFromString(@"SFPhotoViewController");
+        if (photoViewControllerClass && !HSSwizzledReload) {
+            HSSwizzledReload = HSSwizzleInstanceMethod(photoViewControllerClass,
+                                                       NSSelectorFromString(@"reloadDataFromDeviceWithIgnoreCache:completion:"),
+                                                       (IMP)HSReloadDataFromDevice,
+                                                       (IMP *)&HSOriginalReload);
+        }
+        if (photoViewControllerClass && !HSSwizzledReloadGrid) {
+            HSSwizzledReloadGrid = HSSwizzleInstanceMethod(photoViewControllerClass,
+                                                           NSSelectorFromString(@"reloadGrid"),
+                                                           (IMP)HSReloadGrid,
+                                                           (IMP *)&HSOriginalReloadGrid);
+        }
+
+        HSInstallPhotoItemRenderPatch();
+
+        if (HSSwizzledParser && HSSwizzledReload && HSSwizzledReloadGrid && HSSwizzledPhotoItemImageSetter && HSSwizzledPhotoItemLifecycle && !HSLoggedInstall) {
+            HSLoggedInstall = YES;
+            HSSchedulePhotoCacheCleanup(@"patch-installed");
+            NSLog(@"[HandShakerMaintained] Photo library async/thumbnail/layer/cache-cleanup patch installed");
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[HandShakerMaintained] Photo library patch install failed: %@", exception);
     }
 
-    Class albumsClass = NSClassFromString(@"SFPhotoAlbumsViewModel");
-    if (albumsClass && !HSSwizzledParser) {
-        HSSwizzledParser = HSSwizzleInstanceMethod(albumsClass,
-                                                   NSSelectorFromString(@"parserPhotoLibraryData:"),
-                                                   (IMP)HSParserPhotoLibraryData,
-                                                   (IMP *)&HSOriginalParser);
+    HSLogRuntimeDiagnostics();
+}
+
+static void HSFRLogAskingNoOp(__unused id self, __unused SEL _cmd) {
+    NSLog(@"[HandShakerMaintained] Legacy user-experience prompt suppressed");
+}
+
+static void HSSetExceptionHandlingMaskZero(id self, SEL _cmd, __unused NSUInteger mask) {
+    if (HSOriginalSetExceptionHandlingMask) {
+        HSOriginalSetExceptionHandlingMask(self, _cmd, 0);
+    }
+}
+
+static void HSSetExceptionHangingMaskZero(id self, SEL _cmd, __unused NSUInteger mask) {
+    if (HSOriginalSetExceptionHangingMask) {
+        HSOriginalSetExceptionHangingMask(self, _cmd, 0);
+    }
+}
+
+static void HSZeroExceptionHandlerMasks(void) {
+    Class handlerClass = NSClassFromString(@"NSExceptionHandler");
+    SEL defaultHandlerSelector = NSSelectorFromString(@"defaultExceptionHandler");
+    if (!handlerClass || ![(id)handlerClass respondsToSelector:defaultHandlerSelector]) {
+        return;
     }
 
-    Class photoViewControllerClass = NSClassFromString(@"SFPhotoViewController");
-    if (photoViewControllerClass && !HSSwizzledReload) {
-        HSSwizzledReload = HSSwizzleInstanceMethod(photoViewControllerClass,
-                                                   NSSelectorFromString(@"reloadDataFromDeviceWithIgnoreCache:completion:"),
-                                                   (IMP)HSReloadDataFromDevice,
-                                                   (IMP *)&HSOriginalReload);
-    }
-    if (photoViewControllerClass && !HSSwizzledReloadGrid) {
-        HSSwizzledReloadGrid = HSSwizzleInstanceMethod(photoViewControllerClass,
-                                                       NSSelectorFromString(@"reloadGrid"),
-                                                       (IMP)HSReloadGrid,
-                                                       (IMP *)&HSOriginalReloadGrid);
+    id handler = ((HSInitMsgSend)objc_msgSend)((id)handlerClass, defaultHandlerSelector);
+    if (!handler) {
+        return;
     }
 
-    HSInstallPhotoItemRenderPatch();
-
-    if (HSSwizzledParser && HSSwizzledReload && HSSwizzledReloadGrid && HSSwizzledPhotoItemImageSetter && HSSwizzledPhotoItemLifecycle && !HSLoggedInstall) {
-        HSLoggedInstall = YES;
-        NSLog(@"[HandShakerMaintained] Photo library async/thumbnail/layer patch installed");
+    SEL handlingSelector = NSSelectorFromString(@"setExceptionHandlingMask:");
+    if ([handler respondsToSelector:handlingSelector]) {
+        ((HSSetMaskIMP)objc_msgSend)(handler, handlingSelector, 0);
     }
+
+    SEL hangingSelector = NSSelectorFromString(@"setExceptionHangingMask:");
+    if ([handler respondsToSelector:hangingSelector]) {
+        ((HSSetMaskIMP)objc_msgSend)(handler, hangingSelector, 0);
+    }
+}
+
+static void HSInstallLegacyReporterGuards(BOOL zeroExistingMasks) {
+    @try {
+        if (!HSRegisteredLegacyPromptDefaults) {
+            HSRegisteredLegacyPromptDefaults = YES;
+            [[NSUserDefaults standardUserDefaults] registerDefaults:@{
+                @"FRDidAskUXProgram" : @YES,
+                @"FRAutomaticallySendUsageDataToSmartisan" : @NO,
+            }];
+        }
+
+        if (!HSSwizzledFRLogAsking) {
+            Class frLogClass = NSClassFromString(@"FRLog");
+            if (frLogClass) {
+                HSSwizzledFRLogAsking = HSSwizzleInstanceMethodOnce(frLogClass,
+                                                                    NSSelectorFromString(@"asking"),
+                                                                    (IMP)HSFRLogAskingNoOp,
+                                                                    (IMP *)&HSOriginalFRLogAsking);
+            }
+        }
+
+        if (!HSSwizzledExceptionHandlerMasks) {
+            Class handlerClass = NSClassFromString(@"NSExceptionHandler");
+            if (handlerClass) {
+                BOOL ok = YES;
+                ok = HSSwizzleInstanceMethodOnce(handlerClass,
+                                                 NSSelectorFromString(@"setExceptionHandlingMask:"),
+                                                 (IMP)HSSetExceptionHandlingMaskZero,
+                                                 (IMP *)&HSOriginalSetExceptionHandlingMask) && ok;
+                ok = HSSwizzleInstanceMethodOnce(handlerClass,
+                                                 NSSelectorFromString(@"setExceptionHangingMask:"),
+                                                 (IMP)HSSetExceptionHangingMaskZero,
+                                                 (IMP *)&HSOriginalSetExceptionHangingMask) && ok;
+                HSSwizzledExceptionHandlerMasks = ok;
+                if (ok && HSSwizzledFRLogAsking) {
+                    NSLog(@"[HandShakerMaintained] Legacy reporter guards installed (UX prompt + exception masks)");
+                }
+            }
+        }
+
+        if (zeroExistingMasks && HSSwizzledExceptionHandlerMasks) {
+            HSZeroExceptionHandlerMasks();
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[HandShakerMaintained] Legacy reporter guard install failed: %@", exception);
+    }
+}
+
+static void HSResetCrashSignalHandlers(NSString *reason) {
+    static const int crashSignals[] = {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP, SIGSYS};
+    int resetCount = 0;
+    for (size_t index = 0; index < sizeof(crashSignals) / sizeof(crashSignals[0]); index += 1) {
+        sig_t previousHandler = signal(crashSignals[index], SIG_DFL);
+        if (previousHandler != SIG_DFL && previousHandler != SIG_ERR) {
+            resetCount += 1;
+        }
+    }
+    NSLog(@"[HandShakerMaintained] Crash signal handlers reset custom=%d reason=%@", resetCount, reason ?: @"");
+}
+
+static void HSScheduleLegacyReporterTeardown(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        HSInstallLegacyReporterGuards(YES);
+        HSResetCrashSignalHandlers(@"post-launch-3s");
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        HSInstallLegacyReporterGuards(YES);
+        HSResetCrashSignalHandlers(@"post-launch-15s");
+    });
 }
 
 __attribute__((constructor))
 static void HSPhotoLibraryAsyncPatchEntry(void) {
+    HSInstallLegacyReporterGuards(NO);
+    HSInstallUSBHandshakePatch();
+
     dispatch_async(dispatch_get_main_queue(), ^{
+        HSInstallLegacyReporterGuards(YES);
         HSInstallPhotoLibraryAsyncPatch();
+        HSScheduleLegacyReporterTeardown();
 
         [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidFinishLaunchingNotification
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(__unused NSNotification *note) {
+            HSInstallLegacyReporterGuards(YES);
             HSInstallPhotoLibraryAsyncPatch();
         }];
     });
