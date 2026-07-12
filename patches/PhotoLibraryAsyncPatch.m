@@ -14,15 +14,6 @@ typedef id (*HSIdLongLongMsgSend)(id, SEL, long long);
 typedef void (*HSSetMaskIMP)(id, SEL, NSUInteger);
 typedef id (*HSUSBHandshakeIMP)(id, SEL, int);
 
-@interface HSPreparedPhotoImageBox : NSObject
-@property(nonatomic) NSSize targetSize;
-@property(nonatomic) CGFloat scale;
-@property(nonatomic, strong) NSImage *image;
-@end
-
-@implementation HSPreparedPhotoImageBox
-@end
-
 @interface HSPhotoCacheFileEntry : NSObject
 @property(nonatomic, copy) NSString *path;
 @property(nonatomic) unsigned long long size;
@@ -32,10 +23,20 @@ typedef id (*HSUSBHandshakeIMP)(id, SEL, int);
 @implementation HSPhotoCacheFileEntry
 @end
 
+@interface HSPreparedPhotoImageBox : NSObject
+@property(nonatomic) NSSize targetSize;
+@property(nonatomic) CGFloat scale;
+@property(nonatomic, strong) NSImage *image;
+@end
+
+@implementation HSPreparedPhotoImageBox
+@end
+
 static HSParserIMP HSOriginalParser = NULL;
 static HSReloadIMP HSOriginalReload = NULL;
 static HSVMsgSend HSOriginalReloadGrid = NULL;
 static HSObjectSetterIMP HSOriginalSetImage = NULL;
+static HSInitMsgSend HSOriginalSquareImage = NULL;
 static HSInitMsgSend HSOriginalPhotoItemInit = NULL;
 static HSObjectSetterIMP HSOriginalSetRepresentedObject = NULL;
 static HSVMsgSend HSOriginalFRLogAsking = NULL;
@@ -49,14 +50,19 @@ static char HSPhotoLibraryParsingKey;
 static char HSPhotoLibraryParseTokenKey;
 static char HSPhotoItemLastImageKey;
 static char HSPhotoItemConfiguredKey;
+static char HSPhotoItemSourceImageKey;
+static char HSAlbumSquareImageKey;
 static dispatch_queue_t HSPhotoParserQueue;
 static dispatch_queue_t HSPhotoCacheCleanupQueue;
+static dispatch_queue_t HSPhotoImageQueue;
+static dispatch_semaphore_t HSPhotoImageSemaphore;
 static NSUInteger HSPhotoLibraryParseGeneration = 0;
 static BOOL HSPhotoCacheCleanupScheduled = NO;
 static BOOL HSSwizzledParser = NO;
 static BOOL HSSwizzledReload = NO;
 static BOOL HSSwizzledReloadGrid = NO;
 static BOOL HSSwizzledPhotoItemImageSetter = NO;
+static BOOL HSSwizzledAlbumSquareImage = NO;
 static BOOL HSSwizzledPhotoItemLifecycle = NO;
 static BOOL HSSwizzledFRLogAsking = NO;
 static BOOL HSSwizzledExceptionHandlerMasks = NO;
@@ -65,8 +71,8 @@ static BOOL HSRegisteredLegacyPromptDefaults = NO;
 static BOOL HSLoggedInstall = NO;
 static BOOL HSDiagnosticsLogged = NO;
 
-static const unsigned long long HSPhotoCacheDefaultMaxBytes = 1024ULL * 1024ULL * 1024ULL;
-static const unsigned long long HSPhotoCacheDefaultTargetBytes = 768ULL * 1024ULL * 1024ULL;
+static const unsigned long long HSPhotoCacheDefaultMaxBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+static const unsigned long long HSPhotoCacheDefaultTargetBytes = 1536ULL * 1024ULL * 1024ULL;
 static const unsigned long long HSPhotoCacheLowDiskMaxBytes = 512ULL * 1024ULL * 1024ULL;
 static const unsigned long long HSPhotoCacheLowDiskTargetBytes = 384ULL * 1024ULL * 1024ULL;
 static const unsigned long long HSPhotoCacheLowDiskFreeBytes = 10ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -417,27 +423,16 @@ static NSRect HSRectFromSelector(id target, SEL selector) {
     return rect;
 }
 
-static NSImage *HSPreparedPhotoImageForView(id itemView, id imageValue) {
-    if (![itemView isKindOfClass:[NSView class]] || ![imageValue isKindOfClass:[NSImage class]]) {
+static NSImage *HSPreparedPhotoImage(id imageValue, NSSize targetSize, CGFloat scale) {
+    if (![imageValue isKindOfClass:[NSImage class]]) {
         return imageValue;
     }
 
-    NSView *view = (NSView *)itemView;
     NSImage *image = (NSImage *)imageValue;
-    NSRect imageRect = HSRectFromSelector(itemView, NSSelectorFromString(@"imageRect"));
-    if (NSIsEmptyRect(imageRect)) {
-        imageRect = view.bounds;
-    }
-    if (NSIsEmptyRect(imageRect)) {
-        return image;
-    }
-
-    NSSize targetSize = NSMakeSize(ceil(NSWidth(imageRect)), ceil(NSHeight(imageRect)));
     if (targetSize.width < 1.0 || targetSize.height < 1.0) {
         return image;
     }
 
-    CGFloat scale = HSBackingScaleForView(view);
     NSInteger pixelsWide = (NSInteger)ceil(targetSize.width * scale);
     NSInteger pixelsHigh = (NSInteger)ceil(targetSize.height * scale);
     if (pixelsWide < 1 || pixelsHigh < 1) {
@@ -622,6 +617,11 @@ static void HSParserPhotoLibraryData(id self, SEL _cmd, id photoLibraryData) {
     id parserTarget = self;
     id parserData = photoLibraryData;
     id controller = HSLastPhotoViewController;
+    if (controller && HSIsPhotoLibraryParsing(controller)) {
+        NSLog(@"[HandShakerMaintained] Photo library parse skipped because a task is already active controller=%@",
+              NSStringFromClass([controller class]));
+        return;
+    }
     NSUInteger token = HSNextPhotoLibraryParseToken();
     NSDate *parseStart = [NSDate date];
     NSLog(@"[HandShakerMaintained] Photo library parse scheduled token=%lu parser=%@ data=%@ controller=%@",
@@ -656,7 +656,6 @@ static void HSParserPhotoLibraryData(id self, SEL _cmd, id photoLibraryData) {
                             objc_setAssociatedObject(controller, &HSPhotoLibraryParseTokenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                         }
                         HSUpdatePhotoLoading(controller);
-                        HSSchedulePhotoCacheCleanup(@"photo-library-parsed");
                     }
                 });
             }
@@ -697,17 +696,40 @@ static void HSSetRepresentedObject(id self, SEL _cmd, id value) {
 }
 
 static void HSSetPhotoItemImage(id self, SEL _cmd, id value) {
-    if (HSOriginalSetImage) {
-        HSConfigurePhotoItemView(self);
-        id preparedImage = HSPreparedPhotoImageForView(self, value);
-        id lastImage = objc_getAssociatedObject(self, &HSPhotoItemLastImageKey);
-        if (lastImage == preparedImage) {
-            return;
-        }
-
-        objc_setAssociatedObject(self, &HSPhotoItemLastImageKey, preparedImage, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        HSOriginalSetImage(self, _cmd, preparedImage);
+    if (!HSOriginalSetImage) {
+        return;
     }
+    if (![self isKindOfClass:[NSView class]] || ![value isKindOfClass:[NSImage class]]) {
+        HSOriginalSetImage(self, _cmd, value);
+        return;
+    }
+
+    NSView *itemView = self;
+    NSRect imageRect = HSRectFromSelector(self, NSSelectorFromString(@"imageRect"));
+    if (NSIsEmptyRect(imageRect)) {
+        imageRect = itemView.bounds;
+    }
+    NSSize targetSize = NSMakeSize(ceil(NSWidth(imageRect)), ceil(NSHeight(imageRect)));
+    id preparedImage = HSPreparedPhotoImage(value, targetSize, HSBackingScaleForView(itemView));
+    id lastImage = objc_getAssociatedObject(self, &HSPhotoItemLastImageKey);
+    if (lastImage == preparedImage) {
+        return;
+    }
+    objc_setAssociatedObject(self, &HSPhotoItemLastImageKey, preparedImage, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    HSOriginalSetImage(self, _cmd, preparedImage);
+}
+
+static id HSCachedSquareImage(id self, SEL _cmd) {
+    id cached = objc_getAssociatedObject(self, &HSAlbumSquareImageKey);
+    if (cached) {
+        return cached;
+    }
+
+    id image = HSOriginalSquareImage ? HSOriginalSquareImage(self, _cmd) : self;
+    if (image) {
+        objc_setAssociatedObject(self, &HSAlbumSquareImageKey, image, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return image;
 }
 
 static BOOL HSSwizzleInstanceMethod(Class cls, SEL selector, IMP replacement, IMP *original) {
@@ -766,18 +788,18 @@ static void HSInstallPhotoItemRenderPatch(void) {
                                                                     (IMP)HSSetPhotoItemImage,
                                                                     (IMP *)&HSOriginalSetImage);
     }
-    if (!HSSwizzledPhotoItemLifecycle) {
-        BOOL ok = YES;
-        ok = HSSwizzleInstanceMethodOnce(itemClass,
-                                         NSSelectorFromString(@"init"),
-                                         (IMP)HSPhotoItemInit,
-                                         (IMP *)&HSOriginalPhotoItemInit) && ok;
-        ok = HSSwizzleInstanceMethodOnce(itemClass,
-                                         NSSelectorFromString(@"setRepresentedObject:"),
-                                         (IMP)HSSetRepresentedObject,
-                                         (IMP *)&HSOriginalSetRepresentedObject) && ok;
-        HSSwizzledPhotoItemLifecycle = ok;
+}
+
+static void HSInstallAlbumCoverPatch(void) {
+    Class imageClass = [NSImage class];
+    if (!imageClass || HSSwizzledAlbumSquareImage) {
+        return;
     }
+
+    HSSwizzledAlbumSquareImage = HSSwizzleInstanceMethodOnce(imageClass,
+                                                             NSSelectorFromString(@"squareImage"),
+                                                             (IMP)HSCachedSquareImage,
+                                                             (IMP *)&HSOriginalSquareImage);
 }
 
 static void HSInstallPhotoLibraryAsyncPatch(void) {
@@ -812,11 +834,12 @@ static void HSInstallPhotoLibraryAsyncPatch(void) {
         }
 
         HSInstallPhotoItemRenderPatch();
+        HSInstallAlbumCoverPatch();
 
-        if (HSSwizzledParser && HSSwizzledReload && HSSwizzledReloadGrid && HSSwizzledPhotoItemImageSetter && HSSwizzledPhotoItemLifecycle && !HSLoggedInstall) {
+        if (HSSwizzledParser && HSSwizzledReload && HSSwizzledReloadGrid && HSSwizzledPhotoItemImageSetter && HSSwizzledAlbumSquareImage && !HSLoggedInstall) {
             HSLoggedInstall = YES;
             HSSchedulePhotoCacheCleanup(@"patch-installed");
-            NSLog(@"[HandShakerMaintained] Photo library async/thumbnail/layer/cache-cleanup patch installed");
+            NSLog(@"[HandShakerMaintained] Photo library async/image-cache/album-cover-cache/cache-cleanup patch installed");
         }
     } @catch (NSException *exception) {
         NSLog(@"[HandShakerMaintained] Photo library patch install failed: %@", exception);
