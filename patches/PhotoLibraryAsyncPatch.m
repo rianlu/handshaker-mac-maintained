@@ -59,6 +59,8 @@ static HSLongLongNoArgumentIMP HSOriginalSyncItemStartType = NULL;
 static HSInitMsgSend HSOriginalSyncConfigViewInit = NULL;
 static HSInitMsgSend HSOriginalSyncConfigWindowInit = NULL;
 static HSVMsgSend HSOriginalSyncConfigOpenWindow = NULL;
+static HSInitMsgSend HSOriginalVideoAllowedFileTypes = NULL;
+static HSBoolObjectIMP HSOriginalIsSupportedVideoExt = NULL;
 static __weak id HSLastPhotoViewController = nil;
 static char HSPreparedPhotoImageKey;
 static char HSPhotoLoadingOverlayKey;
@@ -85,6 +87,8 @@ static BOOL HSSwizzledExceptionHandlerMasks = NO;
 static BOOL HSSwizzledUSBHandshake = NO;
 static BOOL HSSwizzledPreferences = NO;
 static BOOL HSSwizzledPhotoSyncPromptDiagnostics = NO;
+static BOOL HSSwizzledVideoAllowedFileTypes = NO;
+static BOOL HSSwizzledSupportedVideoExt = NO;
 static BOOL HSRegisteredLegacyPromptDefaults = NO;
 static BOOL HSLoggedInstall = NO;
 static BOOL HSDiagnosticsLogged = NO;
@@ -1035,6 +1039,43 @@ static void HSInstallUSBHandshakePatch(void) {
     }
 }
 
+static id HSVideoAllowedFileTypes(id self, SEL _cmd) {
+    NSArray *original = HSOriginalVideoAllowedFileTypes ? HSOriginalVideoAllowedFileTypes(self, _cmd) : nil;
+    NSMutableOrderedSet *types = [NSMutableOrderedSet orderedSetWithArray:[original isKindOfClass:[NSArray class]] ? original : @[]];
+    [types addObjectsFromArray:@[@"mov", @"m4v"]];
+    return types.array;
+}
+
+static BOOL HSIsSupportedVideoExt(id self, SEL _cmd, id extension) {
+    NSString *normalized = [extension isKindOfClass:[NSString class]] ? [extension lowercaseString] : nil;
+    if ([normalized isEqualToString:@"mov"] || [normalized isEqualToString:@"m4v"]) {
+        return YES;
+    }
+    return HSOriginalIsSupportedVideoExt ? HSOriginalIsSupportedVideoExt(self, _cmd, extension) : NO;
+}
+
+static void HSInstallVideoFormatPatch(void) {
+    Class videoClass = NSClassFromString(@"SFVideoViewController");
+    if (videoClass && !HSSwizzledVideoAllowedFileTypes) {
+        HSSwizzledVideoAllowedFileTypes = HSSwizzleInstanceMethodOnce(videoClass,
+                                                                      NSSelectorFromString(@"allowedFileTypes"),
+                                                                      (IMP)HSVideoAllowedFileTypes,
+                                                                      (IMP *)&HSOriginalVideoAllowedFileTypes);
+    }
+
+    Class fileClass = NSClassFromString(@"SFFile");
+    if (fileClass && !HSSwizzledSupportedVideoExt) {
+        HSSwizzledSupportedVideoExt = HSSwizzleInstanceMethodOnce(object_getClass(fileClass),
+                                                                  NSSelectorFromString(@"isSupportedVideoExt:"),
+                                                                  (IMP)HSIsSupportedVideoExt,
+                                                                  (IMP *)&HSOriginalIsSupportedVideoExt);
+    }
+
+    if (HSSwizzledVideoAllowedFileTypes && HSSwizzledSupportedVideoExt) {
+        NSLog(@"[HandShakerMaintained] Video formats extended: mov, m4v");
+    }
+}
+
 static void HSInstallPhotoItemRenderPatch(void) {
     Class itemClass = NSClassFromString(@"SFPhotoItemView");
     if (!itemClass) {
@@ -1226,6 +1267,7 @@ static void HSPhotoLibraryAsyncPatchEntry(void) {
         HSInstallLegacyReporterGuards(YES);
         HSInstallPreferencesPatch();
         HSInstallPhotoSyncPromptDiagnostics();
+        HSInstallVideoFormatPatch();
         HSInstallPhotoLibraryAsyncPatch();
         HSScheduleLegacyReporterTeardown();
 
@@ -1236,6 +1278,7 @@ static void HSPhotoLibraryAsyncPatchEntry(void) {
             HSInstallLegacyReporterGuards(YES);
             HSInstallPreferencesPatch();
             HSInstallPhotoSyncPromptDiagnostics();
+            HSInstallVideoFormatPatch();
             HSInstallPhotoLibraryAsyncPatch();
         }];
     });

@@ -7,6 +7,7 @@ BUILD_DIR="build"
 DMG_ASSETS_DIR="assets/dmg"
 RELEASE_CONFIG_FILE="./release.conf"
 SMARTFINDER_CORE_PATCH_SCRIPT="./patches/build_smartfinder_core_wrapper.sh"
+ANDROID_RELEASE_MANIFEST_DEFAULT="../handshaker-android-maintained/build/release/handshaker-android-release.env"
 
 fail() {
   printf '%s\n' "FAIL: $1" >&2
@@ -71,6 +72,28 @@ apply_release_version() {
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${RELEASE_BUILD_NUMBER}" "${info_plist}"
 }
 
+sync_android_apk() {
+  local manifest_path="${HANDSHAKER_ANDROID_RELEASE_MANIFEST:-${ANDROID_RELEASE_MANIFEST_DEFAULT}}"
+  local target_apk="${APP_TEMPLATE_DIR}/Contents/Frameworks/SmartFinderCore.framework/Versions/A/Resources/SmartFolder.apk"
+  local actual_sha256
+
+  require_file "${manifest_path}"
+  # shellcheck disable=SC1090
+  . "${manifest_path}"
+  : "${HANDSHAKER_ANDROID_APK:?missing HANDSHAKER_ANDROID_APK in ${manifest_path}}"
+  : "${HANDSHAKER_ANDROID_VERSION_NAME:?missing HANDSHAKER_ANDROID_VERSION_NAME in ${manifest_path}}"
+  : "${HANDSHAKER_ANDROID_VERSION_CODE:?missing HANDSHAKER_ANDROID_VERSION_CODE in ${manifest_path}}"
+  : "${HANDSHAKER_ANDROID_SHA256:?missing HANDSHAKER_ANDROID_SHA256 in ${manifest_path}}"
+
+  require_file "${HANDSHAKER_ANDROID_APK}"
+  actual_sha256="$(shasum -a 256 "${HANDSHAKER_ANDROID_APK}" | awk '{print $1}')"
+  [ "${actual_sha256}" = "${HANDSHAKER_ANDROID_SHA256}" ] || fail "Android APK SHA-256 mismatch"
+
+  cp "${HANDSHAKER_ANDROID_APK}" "${target_apk}"
+  printf '%s\n' "Android APK: ${HANDSHAKER_ANDROID_VERSION_NAME} (${HANDSHAKER_ANDROID_VERSION_CODE})"
+  printf '%s\n' "Android APK SHA-256: ${actual_sha256}"
+}
+
 patch_legacy_nib_button() {
   local nib_path="$1"
   local match_count
@@ -114,6 +137,11 @@ require_command codesign
 require_command create-dmg
 require_command lipo
 require_command perl
+require_command shasum
+require_command awk
+
+echo "📱 正在同步 Android 正式 APK..."
+sync_android_apk
 
 if [ -f "${SMARTFINDER_CORE_PATCH_SCRIPT}" ]; then
   echo "🧩 正在应用 SmartFinderCore 运行时补丁..."
