@@ -71,14 +71,41 @@ apply_release_version() {
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${RELEASE_BUILD_NUMBER}" "${info_plist}"
 }
 
-patch_preference_nib() {
-  local nib_path="${BUILD_DIR}/HandShaker.app/Contents/Resources/Preference.nib"
+patch_legacy_nib_button() {
+  local nib_path="$1"
   local match_count
 
   require_file "${nib_path}"
   match_count="$(LC_ALL=C grep -ao 'SFButton' "${nib_path}" | wc -l | tr -d ' ')"
-  [ "${match_count}" = "1" ] || fail "unexpected SFButton count in Preference.nib: ${match_count}"
+  [ "${match_count}" = "1" ] || fail "unexpected SFButton count in ${nib_path}: ${match_count}"
   LC_ALL=C perl -0pi -e 's/SFButton/HSButton/g' "${nib_path}"
+}
+
+restore_photo_sync_prompt() {
+  local executable_path="${BUILD_DIR}/HandShaker.app/Contents/MacOS/HandShaker"
+
+  require_file "${executable_path}"
+  EXECUTABLE_PATH="${executable_path}" perl <<'PERL' || fail "failed to restore local sync prompt"
+use strict;
+use warnings;
+
+my $path = $ENV{EXECUTABLE_PATH};
+open my $file, '+<', $path or die "cannot open $path: $!\n";
+binmode $file;
+
+sub restore_bytes {
+  my ($offset, $disabled, $enabled, $label) = @_;
+  seek $file, $offset, 0 or die "cannot seek to $label: $!\n";
+  read $file, my $actual, length($disabled) == length($enabled) ? length($disabled) : die "invalid $label patch length\n";
+  return if $actual eq $enabled;
+  die "unexpected bytes for $label\n" unless $actual eq $disabled;
+  seek $file, $offset, 0 or die "cannot seek to $label: $!\n";
+  print {$file} $enabled or die "cannot restore $label: $!\n";
+}
+
+restore_bytes(0x394ea, pack('H*', 'e98d01000000'), pack('H*', '0f848c010000'), 'photo sync view init');
+restore_bytes(0x3a077, pack('H*', 'c3'), pack('H*', '55'), 'photo sync window open');
+PERL
 }
 
 load_release_config
@@ -86,6 +113,7 @@ load_release_config
 require_command codesign
 require_command create-dmg
 require_command lipo
+require_command perl
 
 if [ -f "${SMARTFINDER_CORE_PATCH_SCRIPT}" ]; then
   echo "🧩 正在应用 SmartFinderCore 运行时补丁..."
@@ -101,8 +129,10 @@ mkdir -p "${BUILD_DIR}/HandShaker.app"
 cp -R "${APP_TEMPLATE_DIR}/Contents" "${BUILD_DIR}/HandShaker.app/"
 
 # 2.1 避免系统 SearchFoundation.SFButton 与 HandShaker.SFButton 同名冲突
-echo "🛠️ 正在修复设置窗口兼容性..."
-patch_preference_nib
+echo "🛠️ 正在修复旧版界面兼容性..."
+patch_legacy_nib_button "${BUILD_DIR}/HandShaker.app/Contents/Resources/Preference.nib"
+patch_legacy_nib_button "${BUILD_DIR}/HandShaker.app/Contents/Resources/SFPhotoSyncConfigView.nib"
+restore_photo_sync_prompt
 
 # 2.2 注入版本信息
 echo "🏷️ 正在应用维护版版本号..."

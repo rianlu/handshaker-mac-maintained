@@ -16,6 +16,9 @@ typedef void (*HSSetMaskIMP)(id, SEL, NSUInteger);
 typedef id (*HSUSBHandshakeIMP)(id, SEL, int);
 typedef void (*HSObjectBoolMsgSend)(id, SEL, id, BOOL);
 typedef void (*HSBoolMsgSend)(id, SEL, BOOL);
+typedef BOOL (*HSBoolNoArgumentIMP)(id, SEL);
+typedef BOOL (*HSBoolObjectIMP)(id, SEL, id);
+typedef long long (*HSLongLongNoArgumentIMP)(id, SEL);
 
 @interface HSPhotoCacheFileEntry : NSObject
 @property(nonatomic, copy) NSString *path;
@@ -48,6 +51,14 @@ static HSSetMaskIMP HSOriginalSetExceptionHangingMask = NULL;
 static HSUSBHandshakeIMP HSOriginalUSBHandshake = NULL;
 static IMP HSOriginalPreferenceAction = NULL;
 static IMP HSOriginalPreferenceActionWithIdentifier = NULL;
+static HSBoolNoArgumentIMP HSOriginalNeedRemindAutoSync = NULL;
+static HSBoolNoArgumentIMP HSOriginalEnableAutoSync = NULL;
+static HSObjectSetterIMP HSOriginalPhotoSetClient = NULL;
+static HSBoolObjectIMP HSOriginalIsFirstSync = NULL;
+static HSLongLongNoArgumentIMP HSOriginalSyncItemStartType = NULL;
+static HSInitMsgSend HSOriginalSyncConfigViewInit = NULL;
+static HSInitMsgSend HSOriginalSyncConfigWindowInit = NULL;
+static HSVMsgSend HSOriginalSyncConfigOpenWindow = NULL;
 static __weak id HSLastPhotoViewController = nil;
 static char HSPreparedPhotoImageKey;
 static char HSPhotoLoadingOverlayKey;
@@ -73,6 +84,7 @@ static BOOL HSSwizzledFRLogAsking = NO;
 static BOOL HSSwizzledExceptionHandlerMasks = NO;
 static BOOL HSSwizzledUSBHandshake = NO;
 static BOOL HSSwizzledPreferences = NO;
+static BOOL HSSwizzledPhotoSyncPromptDiagnostics = NO;
 static BOOL HSRegisteredLegacyPromptDefaults = NO;
 static BOOL HSLoggedInstall = NO;
 static BOOL HSDiagnosticsLogged = NO;
@@ -157,6 +169,36 @@ static NSString *HSHandShakerApplicationSupportPath(void) {
 
 static NSString *HSPhotoThumbnailCachePath(void) {
     return [[HSHandShakerApplicationSupportPath() stringByAppendingPathComponent:@"thumbnails"] stringByStandardizingPath];
+}
+
+static void HSLogPhotoSyncPrompt(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+
+static void HSLogPhotoSyncPrompt(NSString *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
+    va_end(arguments);
+
+    NSString *line = [NSString stringWithFormat:@"%@ [PhotoSyncPrompt] %@\n", [NSDate date], message];
+    NSLog(@"[HandShakerMaintained] [PhotoSyncPrompt] %@", message);
+
+    NSString *logDirectory = [HSHandShakerApplicationSupportPath() stringByAppendingPathComponent:@"logs"];
+    NSString *logPath = [logDirectory stringByAppendingPathComponent:@"maintained.log"];
+    if (!logPath.length) {
+        return;
+    }
+
+    @synchronized([NSFileHandle class]) {
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        [fileManager createDirectoryAtPath:logDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+        if (![fileManager fileExistsAtPath:logPath]) {
+            [fileManager createFileAtPath:logPath contents:nil attributes:nil];
+        }
+        NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:logPath];
+        [file seekToEndOfFile];
+        [file writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [file closeFile];
+    }
 }
 
 static unsigned long long HSDirectorySizeAtPath(NSString *path) {
@@ -756,6 +798,119 @@ static BOOL HSSwizzleInstanceMethodOnce(Class cls, SEL selector, IMP replacement
     return HSSwizzleInstanceMethod(cls, selector, replacement, original);
 }
 
+static BOOL HSNeedRemindAutoSync(id self, SEL _cmd) {
+    BOOL result = HSOriginalNeedRemindAutoSync ? HSOriginalNeedRemindAutoSync(self, _cmd) : NO;
+    HSLogPhotoSyncPrompt(@"isNeedRemindEnableAutoSync result=%d", result);
+    return result;
+}
+
+static BOOL HSEnableAutoSync(id self, SEL _cmd) {
+    BOOL result = HSOriginalEnableAutoSync ? HSOriginalEnableAutoSync(self, _cmd) : NO;
+    HSLogPhotoSyncPrompt(@"isEnableAutoSync result=%d", result);
+    return result;
+}
+
+static void HSPhotoSetClient(id self, SEL _cmd, id client) {
+    HSLogPhotoSyncPrompt(@"SFPhotoViewController setClient begin controller=%p client=%@", self, client);
+    if (HSOriginalPhotoSetClient) {
+        HSOriginalPhotoSetClient(self, _cmd, client);
+    }
+    HSLogPhotoSyncPrompt(@"SFPhotoViewController setClient end prepareAutoSync=%@ windowController=%@",
+                         HSValueForKey(self, @"prepareAutoSync") ?: @"<nil>",
+                         HSValueForKey(self, @"syncConfigWinController") ?: @"<nil>");
+}
+
+static BOOL HSIsFirstSync(id self, SEL _cmd, id item) {
+    BOOL result = HSOriginalIsFirstSync ? HSOriginalIsFirstSync(self, _cmd, item) : NO;
+    HSLogPhotoSyncPrompt(@"isFirstSyncWithItem result=%d item=%@", result, item);
+    return result;
+}
+
+static long long HSSyncItemStartType(id self, SEL _cmd) {
+    long long result = HSOriginalSyncItemStartType ? HSOriginalSyncItemStartType(self, _cmd) : -1;
+    HSLogPhotoSyncPrompt(@"SFSyncItem startType=%lld item=%@", result, self);
+    return result;
+}
+
+static id HSPhotoSyncConfigViewInit(id self, SEL _cmd) {
+    id result = HSOriginalSyncConfigViewInit ? HSOriginalSyncConfigViewInit(self, _cmd) : nil;
+    HSLogPhotoSyncPrompt(@"SFPhotoSyncConfigViewController init result=%@", result);
+    return result;
+}
+
+static id HSPhotoSyncConfigWindowInit(id self, SEL _cmd) {
+    id result = HSOriginalSyncConfigWindowInit ? HSOriginalSyncConfigWindowInit(self, _cmd) : nil;
+    HSLogPhotoSyncPrompt(@"SFPhotoSyncConfigWindowController init result=%@", result);
+    return result;
+}
+
+static void HSPhotoSyncConfigOpenWindow(id self, SEL _cmd) {
+    HSLogPhotoSyncPrompt(@"SFPhotoSyncConfigWindowController openWindow begin controller=%@", self);
+    if (HSOriginalSyncConfigOpenWindow) {
+        HSOriginalSyncConfigOpenWindow(self, _cmd);
+    }
+
+    id window = HSValueForKey(self, @"window");
+    HSLogPhotoSyncPrompt(@"SFPhotoSyncConfigWindowController openWindow end window=%@ visible=%d",
+                         window ?: @"<nil>",
+                         [window isKindOfClass:[NSWindow class]] ? [(NSWindow *)window isVisible] : NO);
+}
+
+static void HSInstallPhotoSyncPromptDiagnostics(void) {
+    if (HSSwizzledPhotoSyncPromptDiagnostics) {
+        return;
+    }
+
+    Class photoClass = NSClassFromString(@"SFPhotoViewController");
+    Class syncManagerClass = NSClassFromString(@"SFSynchManager");
+    Class syncItemClass = NSClassFromString(@"SFSyncItem");
+    Class configViewClass = NSClassFromString(@"SFPhotoSyncConfigViewController");
+    Class configWindowClass = NSClassFromString(@"SFPhotoSyncConfigWindowController");
+
+    BOOL installed = photoClass && syncManagerClass && syncItemClass && configViewClass && configWindowClass;
+    installed = HSSwizzleInstanceMethodOnce(object_getClass(photoClass),
+                                             NSSelectorFromString(@"isNeedRemindEnableAutoSync"),
+                                             (IMP)HSNeedRemindAutoSync,
+                                             (IMP *)&HSOriginalNeedRemindAutoSync) && installed;
+    installed = HSSwizzleInstanceMethodOnce(object_getClass(photoClass),
+                                             NSSelectorFromString(@"isEnableAutoSync"),
+                                             (IMP)HSEnableAutoSync,
+                                             (IMP *)&HSOriginalEnableAutoSync) && installed;
+    installed = HSSwizzleInstanceMethodOnce(photoClass,
+                                             NSSelectorFromString(@"setClient:"),
+                                             (IMP)HSPhotoSetClient,
+                                             (IMP *)&HSOriginalPhotoSetClient) && installed;
+    installed = HSSwizzleInstanceMethodOnce(syncManagerClass,
+                                             NSSelectorFromString(@"isFirstSyncWithItem:"),
+                                             (IMP)HSIsFirstSync,
+                                             (IMP *)&HSOriginalIsFirstSync) && installed;
+    installed = HSSwizzleInstanceMethodOnce(syncItemClass,
+                                             NSSelectorFromString(@"startType"),
+                                             (IMP)HSSyncItemStartType,
+                                             (IMP *)&HSOriginalSyncItemStartType) && installed;
+    installed = HSSwizzleInstanceMethodOnce(configViewClass,
+                                             NSSelectorFromString(@"init"),
+                                             (IMP)HSPhotoSyncConfigViewInit,
+                                             (IMP *)&HSOriginalSyncConfigViewInit) && installed;
+    installed = HSSwizzleInstanceMethodOnce(configWindowClass,
+                                             NSSelectorFromString(@"init"),
+                                             (IMP)HSPhotoSyncConfigWindowInit,
+                                             (IMP *)&HSOriginalSyncConfigWindowInit) && installed;
+    installed = HSSwizzleInstanceMethodOnce(configWindowClass,
+                                             NSSelectorFromString(@"openWindow"),
+                                             (IMP)HSPhotoSyncConfigOpenWindow,
+                                             (IMP *)&HSOriginalSyncConfigOpenWindow) && installed;
+
+    HSSwizzledPhotoSyncPromptDiagnostics = installed;
+    HSLogPhotoSyncPrompt(@"diagnostics installed=%d photo=%@ manager=%@ item=%@ view=%@ window=%@",
+                         installed,
+                         photoClass,
+                         syncManagerClass,
+                         syncItemClass,
+                         configViewClass,
+                         configWindowClass);
+}
+
 static BOOL HSRegisterPreferenceButtonAlias(void) {
     if (NSClassFromString(@"HSButton")) {
         return YES;
@@ -1065,10 +1220,12 @@ __attribute__((constructor))
 static void HSPhotoLibraryAsyncPatchEntry(void) {
     HSInstallLegacyReporterGuards(NO);
     HSInstallUSBHandshakePatch();
+    HSInstallPhotoSyncPromptDiagnostics();
 
     dispatch_async(dispatch_get_main_queue(), ^{
         HSInstallLegacyReporterGuards(YES);
         HSInstallPreferencesPatch();
+        HSInstallPhotoSyncPromptDiagnostics();
         HSInstallPhotoLibraryAsyncPatch();
         HSScheduleLegacyReporterTeardown();
 
@@ -1078,6 +1235,7 @@ static void HSPhotoLibraryAsyncPatchEntry(void) {
                                                       usingBlock:^(__unused NSNotification *note) {
             HSInstallLegacyReporterGuards(YES);
             HSInstallPreferencesPatch();
+            HSInstallPhotoSyncPromptDiagnostics();
             HSInstallPhotoLibraryAsyncPatch();
         }];
     });
