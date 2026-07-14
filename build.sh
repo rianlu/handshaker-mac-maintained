@@ -71,6 +71,16 @@ apply_release_version() {
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${RELEASE_BUILD_NUMBER}" "${info_plist}"
 }
 
+patch_preference_nib() {
+  local nib_path="${BUILD_DIR}/HandShaker.app/Contents/Resources/Preference.nib"
+  local match_count
+
+  require_file "${nib_path}"
+  match_count="$(LC_ALL=C grep -ao 'SFButton' "${nib_path}" | wc -l | tr -d ' ')"
+  [ "${match_count}" = "1" ] || fail "unexpected SFButton count in Preference.nib: ${match_count}"
+  LC_ALL=C perl -0pi -e 's/SFButton/HSButton/g' "${nib_path}"
+}
+
 load_release_config
 
 require_command codesign
@@ -90,7 +100,11 @@ mkdir -p "${BUILD_DIR}/HandShaker.app"
 # 2. 注入灵魂
 cp -R "${APP_TEMPLATE_DIR}/Contents" "${BUILD_DIR}/HandShaker.app/"
 
-# 2.1 注入版本信息
+# 2.1 避免系统 SearchFoundation.SFButton 与 HandShaker.SFButton 同名冲突
+echo "🛠️ 正在修复设置窗口兼容性..."
+patch_preference_nib
+
+# 2.2 注入版本信息
 echo "🏷️ 正在应用维护版版本号..."
 apply_release_version
 
@@ -102,6 +116,10 @@ codesign --force --deep --sign - "${BUILD_DIR}/HandShaker.app"
 echo "📦 正在生成工业级 DMG 安装包..."
 
 rm -f "${BUILD_DIR}/${RELEASE_DMG_NAME}"
+
+DMG_STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/handshaker-dmg.XXXXXX")"
+trap 'rm -rf "${DMG_STAGING_DIR}"' EXIT
+cp -R "${BUILD_DIR}/HandShaker.app" "${DMG_STAGING_DIR}/"
 
 create-dmg \
   --volname "HandShaker" \
@@ -116,7 +134,7 @@ create-dmg \
   --icon ".background" 150 550 \
   --icon ".VolumeIcon.icns" 450 550 \
   "${BUILD_DIR}/${RELEASE_DMG_NAME}" \
-  "${BUILD_DIR}/"
+  "${DMG_STAGING_DIR}/"
 
 [ -f "${BUILD_DIR}/${RELEASE_DMG_NAME}" ] || fail "dmg packaging did not produce ${BUILD_DIR}/${RELEASE_DMG_NAME}"
 

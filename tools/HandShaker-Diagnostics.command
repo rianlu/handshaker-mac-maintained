@@ -6,7 +6,8 @@ timestamp="$(date '+%Y%m%d-%H%M%S')"
 out_dir="${HOME}/Desktop/HandShaker-Diagnostics-${timestamp}"
 common_dir="${out_dir}/common"
 app_name="HandShaker"
-app_path=""
+app_path="/Applications/HandShaker.app"
+app_executable="${app_path}/Contents/MacOS/HandShaker"
 sampler_pid=""
 usb_monitor_pid=""
 bonjour_monitor_pid=""
@@ -60,34 +61,33 @@ ask_choice() {
 }
 
 find_app() {
-  local script_dir candidate
-  script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
-
-  for candidate in \
-    "${script_dir}/HandShaker.app" \
-    "${script_dir}/../HandShaker.app" \
-    "/Applications/HandShaker.app"
-  do
-    if [ -d "${candidate}" ]; then
-      app_path="${candidate}"
-      return 0
-    fi
-  done
-
-  return 1
+  [ -d "${app_path}" ]
 }
 
 open_handshaker() {
-  if find_app; then
-    open "${app_path}"
-  else
-    printf '%s\n' "HandShaker.app not found. Please keep this script next to HandShaker.app." | tee "${common_dir}/app-not-found.txt"
+  if ! find_app; then
+    printf '%s\n' "未找到 /Applications/HandShaker.app. 请先打开 DMG, 将 HandShaker 拖入应用程序文件夹." | tee "${common_dir}/app-not-found.txt"
     return 1
   fi
+
+  if pgrep -x "${app_name}" >/dev/null 2>&1; then
+    osascript -e 'tell application "HandShaker" to quit' >/dev/null 2>&1 || true
+    for _ in {1..50}; do
+      pgrep -x "${app_name}" >/dev/null 2>&1 || break
+      sleep 0.1
+    done
+  fi
+
+  if pgrep -x "${app_name}" >/dev/null 2>&1; then
+    printf '%s\n' "无法正常关闭正在运行的 HandShaker. 请手动退出后重新运行诊断脚本." | tee "${common_dir}/app-still-running.txt"
+    return 1
+  fi
+
+  open "${app_path}"
 }
 
 find_pid() {
-  pgrep -x "${app_name}" | head -n 1
+  ps -axo pid=,command= | awk -v executable="${app_executable}" '$2 == executable { print $1; exit }'
 }
 
 wait_for_handshaker() {
@@ -138,8 +138,7 @@ capture_sample() {
   fi
 
   run_capture "${scenario_dir}/ps-${label}.txt" ps -p "${pid}" -o pid,ppid,stat,%cpu,%mem,etime,command
-  sample "${pid}" 10 -file "${scenario_dir}/samples/sample-${label}.txt" >"${scenario_dir}/samples/sample-${label}.stderr.txt" 2>&1
-  spindump "${pid}" 5 -file "${scenario_dir}/samples/spindump-${label}.txt" >"${scenario_dir}/samples/spindump-${label}.stderr.txt" 2>&1
+  /usr/bin/sample "${pid}" 10 -file "${scenario_dir}/samples/sample-${label}.txt" >"${scenario_dir}/samples/sample-${label}.stderr.txt" 2>&1
 }
 
 start_sampler() {
@@ -202,8 +201,15 @@ capture_usb_snapshot() {
 start_log_monitor() {
   local scenario_dir="$1"
   local name="$2"
+  local predicate
 
-  /usr/bin/log stream --style syslog --level debug --predicate 'process == "HandShaker" OR process == "kernel" OR process == "sharingd" OR eventMessage CONTAINS[c] "HandShaker" OR eventMessage CONTAINS[c] "HandShakerMaintained" OR eventMessage CONTAINS[c] "SmartFinder" OR eventMessage CONTAINS[c] "USB" OR eventMessage CONTAINS[c] "IOUSB" OR eventMessage CONTAINS[c] "USBHost" OR eventMessage CONTAINS[c] "Accessory" OR eventMessage CONTAINS[c] "AOA" OR eventMessage CONTAINS[c] "Android" OR eventMessage CONTAINS[c] "Xiaomi" OR eventMessage CONTAINS[c] "Smartisan"' >"${scenario_dir}/log-stream-${name}.txt" 2>&1 &
+  if [ "${name}" = "usb" ]; then
+    predicate='process == "HandShaker" OR eventMessage CONTAINS[c] "HandShaker" OR eventMessage CONTAINS[c] "HandShakerMaintained" OR eventMessage CONTAINS[c] "SmartFinder" OR eventMessage CONTAINS[c] "USBHost" OR eventMessage CONTAINS[c] "libusb" OR eventMessage CONTAINS[c] "Accessory" OR eventMessage CONTAINS[c] "AOA" OR eventMessage CONTAINS[c] "Android" OR eventMessage CONTAINS[c] "Xiaomi" OR eventMessage CONTAINS[c] "Smartisan"'
+  else
+    predicate='process == "HandShaker" OR eventMessage CONTAINS[c] "HandShaker" OR eventMessage CONTAINS[c] "HandShakerMaintained" OR eventMessage CONTAINS[c] "SmartFinder" OR eventMessage CONTAINS[c] "Local Network" OR eventMessage CONTAINS[c] "Bonjour" OR eventMessage CONTAINS[c] "_handshaker_ssp" OR eventMessage CONTAINS[c] "nw_connection"'
+  fi
+
+  /usr/bin/log stream --style syslog --level debug --predicate "${predicate}" >"${scenario_dir}/log-stream-${name}.txt" 2>&1 &
   log_monitor_pid="$!"
 }
 
@@ -269,7 +275,7 @@ collect_common() {
     run_capture "${common_dir}/app-info-plist.txt" plutil -p "${app_path}/Contents/Info.plist"
     run_capture "${common_dir}/app-fingerprints.txt" sh -c "shasum -a 256 '${app_path}/Contents/MacOS/HandShaker' '${app_path}/Contents/Frameworks/SmartFinderCore.framework/Versions/A/CorePatch' '${app_path}/Contents/Frameworks/SmartFinderCore.framework/Versions/A/SmartFinderCore' 2>/dev/null"
   else
-    printf '%s\n' "HandShaker.app not found next to this script or in /Applications." >"${common_dir}/app-not-found.txt"
+    printf '%s\n' "HandShaker.app not found in /Applications." >"${common_dir}/app-not-found.txt"
   fi
 }
 
@@ -317,7 +323,7 @@ collect_usb() {
 
   capture_sample "${scenario_dir}" "final"
   capture_usb_snapshot "${scenario_dir}" "after"
-  /usr/bin/log show --style syslog --last 90m --predicate 'process == "HandShaker" OR process == "kernel" OR eventMessage CONTAINS[c] "HandShaker" OR eventMessage CONTAINS[c] "HandShakerMaintained" OR eventMessage CONTAINS[c] "SmartFinder" OR eventMessage CONTAINS[c] "USB" OR eventMessage CONTAINS[c] "IOUSB" OR eventMessage CONTAINS[c] "USBHost" OR eventMessage CONTAINS[c] "libusb" OR eventMessage CONTAINS[c] "Accessory" OR eventMessage CONTAINS[c] "AOA" OR eventMessage CONTAINS[c] "Android" OR eventMessage CONTAINS[c] "Xiaomi" OR eventMessage CONTAINS[c] "Smartisan"' >"${scenario_dir}/system-log-usb.txt" 2>&1
+  /usr/bin/log show --style syslog --last 30m --predicate 'process == "HandShaker" OR eventMessage CONTAINS[c] "HandShaker" OR eventMessage CONTAINS[c] "HandShakerMaintained" OR eventMessage CONTAINS[c] "SmartFinder" OR eventMessage CONTAINS[c] "USBHost" OR eventMessage CONTAINS[c] "libusb" OR eventMessage CONTAINS[c] "Accessory" OR eventMessage CONTAINS[c] "AOA" OR eventMessage CONTAINS[c] "Android" OR eventMessage CONTAINS[c] "Xiaomi" OR eventMessage CONTAINS[c] "Smartisan"' >"${scenario_dir}/system-log-usb.txt" 2>&1
   diff -u "${scenario_dir}/ioreg-usb-before.txt" "${scenario_dir}/ioreg-usb-after.txt" >"${scenario_dir}/ioreg-usb-diff.txt" 2>&1 || true
   diff -u "${scenario_dir}/ioreg-usbhost-before.txt" "${scenario_dir}/ioreg-usbhost-after.txt" >"${scenario_dir}/ioreg-usbhost-diff.txt" 2>&1 || true
   collect_handshaker_files "${scenario_dir}"
@@ -370,7 +376,7 @@ collect_wifi() {
 
   capture_sample "${scenario_dir}" "final"
   run_capture "${scenario_dir}/arp-after.txt" arp -a
-  /usr/bin/log show --style syslog --last 90m --predicate 'process == "HandShaker" OR process == "mDNSResponder" OR eventMessage CONTAINS[c] "HandShaker" OR eventMessage CONTAINS[c] "HandShakerMaintained" OR eventMessage CONTAINS[c] "SmartFinder" OR eventMessage CONTAINS[c] "Local Network" OR eventMessage CONTAINS[c] "Bonjour" OR eventMessage CONTAINS[c] "_handshaker_ssp" OR eventMessage CONTAINS[c] "nw_connection"' >"${scenario_dir}/system-log-wifi.txt" 2>&1
+  /usr/bin/log show --style syslog --last 30m --predicate 'process == "HandShaker" OR eventMessage CONTAINS[c] "HandShaker" OR eventMessage CONTAINS[c] "HandShakerMaintained" OR eventMessage CONTAINS[c] "SmartFinder" OR eventMessage CONTAINS[c] "Local Network" OR eventMessage CONTAINS[c] "Bonjour" OR eventMessage CONTAINS[c] "_handshaker_ssp" OR eventMessage CONTAINS[c] "nw_connection"' >"${scenario_dir}/system-log-wifi.txt" 2>&1
   collect_handshaker_files "${scenario_dir}"
   ask_choice "${scenario_dir}/user-result.txt" \
     "请选择这次 Wi-Fi 测试结果:" \
@@ -382,6 +388,12 @@ collect_wifi() {
 
 say_step "HandShaker 诊断工具"
 printf '%s\n' "这个窗口不要关闭. 诊断结束后, 桌面会生成一个 zip 文件."
+if ! find_app; then
+  printf '%s\n' "未找到 /Applications/HandShaker.app."
+  printf '%s\n' "请先打开测试包中的 DMG, 将 HandShaker 拖入应用程序文件夹, 再运行本脚本."
+  press_enter "按回车退出..."
+  exit 1
+fi
 printf '\n%s\n' "请选择要收集的日志:"
 printf '%s\n' "1. 只收集 USB"
 printf '%s\n' "2. 只收集 Wi-Fi"

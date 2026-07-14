@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 #import <limits.h>
 #import <signal.h>
 
@@ -13,6 +14,8 @@ typedef id (*HSInitMsgSend)(id, SEL);
 typedef id (*HSIdLongLongMsgSend)(id, SEL, long long);
 typedef void (*HSSetMaskIMP)(id, SEL, NSUInteger);
 typedef id (*HSUSBHandshakeIMP)(id, SEL, int);
+typedef void (*HSObjectBoolMsgSend)(id, SEL, id, BOOL);
+typedef void (*HSBoolMsgSend)(id, SEL, BOOL);
 
 @interface HSPhotoCacheFileEntry : NSObject
 @property(nonatomic, copy) NSString *path;
@@ -43,6 +46,8 @@ static HSVMsgSend HSOriginalFRLogAsking = NULL;
 static HSSetMaskIMP HSOriginalSetExceptionHandlingMask = NULL;
 static HSSetMaskIMP HSOriginalSetExceptionHangingMask = NULL;
 static HSUSBHandshakeIMP HSOriginalUSBHandshake = NULL;
+static IMP HSOriginalPreferenceAction = NULL;
+static IMP HSOriginalPreferenceActionWithIdentifier = NULL;
 static __weak id HSLastPhotoViewController = nil;
 static char HSPreparedPhotoImageKey;
 static char HSPhotoLoadingOverlayKey;
@@ -67,6 +72,7 @@ static BOOL HSSwizzledPhotoItemLifecycle = NO;
 static BOOL HSSwizzledFRLogAsking = NO;
 static BOOL HSSwizzledExceptionHandlerMasks = NO;
 static BOOL HSSwizzledUSBHandshake = NO;
+static BOOL HSSwizzledPreferences = NO;
 static BOOL HSRegisteredLegacyPromptDefaults = NO;
 static BOOL HSLoggedInstall = NO;
 static BOOL HSDiagnosticsLogged = NO;
@@ -750,6 +756,104 @@ static BOOL HSSwizzleInstanceMethodOnce(Class cls, SEL selector, IMP replacement
     return HSSwizzleInstanceMethod(cls, selector, replacement, original);
 }
 
+static BOOL HSRegisterPreferenceButtonAlias(void) {
+    if (NSClassFromString(@"HSButton")) {
+        return YES;
+    }
+
+    NSString *frameworkPath = [[[NSBundle mainBundle] privateFrameworksPath]
+        stringByAppendingPathComponent:@"HandShakerComponent.framework/Versions/A/HandShakerComponent"];
+    void *handle = dlopen(frameworkPath.fileSystemRepresentation, RTLD_LAZY | RTLD_LOCAL);
+    Class handShakerButtonClass = handle ? (__bridge Class)dlsym(handle, "OBJC_CLASS_$_SFButton") : Nil;
+    if (!handShakerButtonClass) {
+        NSLog(@"[HandShakerMaintained] Preference button alias failed: HandShaker SFButton not found");
+        return NO;
+    }
+
+    Class aliasClass = objc_allocateClassPair(handShakerButtonClass, "HSButton", 0);
+    if (!aliasClass) {
+        return NSClassFromString(@"HSButton") != Nil;
+    }
+
+    objc_registerClassPair(aliasClass);
+    NSLog(@"[HandShakerMaintained] Preference button alias installed superclass=%@", NSStringFromClass(handShakerButtonClass));
+    return YES;
+}
+
+static void HSShowPreferences(id sender, NSString *identifier) {
+    @try {
+        if (!HSRegisterPreferenceButtonAlias()) {
+            return;
+        }
+
+        if (![NSApp isActive]) {
+            [NSApp activateIgnoringOtherApps:YES];
+        }
+
+        Class preferenceClass = NSClassFromString(@"SFPreferenceController");
+        SEL sharedSelector = NSSelectorFromString(@"sharedPrefsWindowController");
+        if (!preferenceClass || ![(id)preferenceClass respondsToSelector:sharedSelector]) {
+            NSLog(@"[HandShakerMaintained] Preference controller unavailable");
+            return;
+        }
+
+        id controller = ((HSInitMsgSend)objc_msgSend)((id)preferenceClass, sharedSelector);
+        if (!controller) {
+            return;
+        }
+
+        SEL showWindowSelector = NSSelectorFromString(@"showWindow:");
+        if ([controller respondsToSelector:showWindowSelector]) {
+            ((HSObjectSetterIMP)objc_msgSend)(controller, showWindowSelector, sender);
+        }
+        id window = ((HSInitMsgSend)objc_msgSend)(controller, NSSelectorFromString(@"window"));
+        if (window && [window respondsToSelector:@selector(makeKeyAndOrderFront:)]) {
+            ((HSObjectSetterIMP)objc_msgSend)(window, @selector(makeKeyAndOrderFront:), sender);
+        }
+
+        if (identifier.length && [controller respondsToSelector:NSSelectorFromString(@"displayViewForIdentifier:animate:")]) {
+            ((HSObjectBoolMsgSend)objc_msgSend)(controller,
+                                               NSSelectorFromString(@"displayViewForIdentifier:animate:"),
+                                               identifier,
+                                               NO);
+        } else if ([controller respondsToSelector:NSSelectorFromString(@"displayViewForDefaultIdentifierAnimate:")]) {
+            ((HSBoolMsgSend)objc_msgSend)(controller,
+                                         NSSelectorFromString(@"displayViewForDefaultIdentifierAnimate:"),
+                                         NO);
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[HandShakerMaintained] Preference window failed: %@", exception);
+    }
+}
+
+static void HSPreferenceAction(__unused id self, __unused SEL _cmd, id sender) {
+    HSShowPreferences(sender, nil);
+}
+
+static void HSPreferenceActionWithIdentifier(__unused id self, __unused SEL _cmd, id sender, id identifier) {
+    HSShowPreferences(sender, [identifier isKindOfClass:[NSString class]] ? identifier : nil);
+}
+
+static void HSInstallPreferencesPatch(void) {
+    Class appDelegateClass = NSClassFromString(@"AppDelegate");
+    if (!appDelegateClass || HSSwizzledPreferences || !HSRegisterPreferenceButtonAlias()) {
+        return;
+    }
+
+    BOOL installed = HSSwizzleInstanceMethodOnce(appDelegateClass,
+                                                 NSSelectorFromString(@"preferenceAction:"),
+                                                 (IMP)HSPreferenceAction,
+                                                 &HSOriginalPreferenceAction);
+    installed = HSSwizzleInstanceMethodOnce(appDelegateClass,
+                                            NSSelectorFromString(@"preferenceAction:selectedIdentifier:"),
+                                            (IMP)HSPreferenceActionWithIdentifier,
+                                            &HSOriginalPreferenceActionWithIdentifier) && installed;
+    HSSwizzledPreferences = installed;
+    if (installed) {
+        NSLog(@"[HandShakerMaintained] Preference window patch installed");
+    }
+}
+
 static id HSSendUSBHandshake(id self, SEL _cmd, int timeout) {
     int effectiveTimeout = timeout > 0 ? timeout : HSUSBHandshakeTimeoutMilliseconds;
     CFAbsoluteTime startedAt = CFAbsoluteTimeGetCurrent();
@@ -964,6 +1068,7 @@ static void HSPhotoLibraryAsyncPatchEntry(void) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         HSInstallLegacyReporterGuards(YES);
+        HSInstallPreferencesPatch();
         HSInstallPhotoLibraryAsyncPatch();
         HSScheduleLegacyReporterTeardown();
 
@@ -972,6 +1077,7 @@ static void HSPhotoLibraryAsyncPatchEntry(void) {
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(__unused NSNotification *note) {
             HSInstallLegacyReporterGuards(YES);
+            HSInstallPreferencesPatch();
             HSInstallPhotoLibraryAsyncPatch();
         }];
     });
