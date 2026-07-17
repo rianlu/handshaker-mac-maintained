@@ -20,6 +20,7 @@ typedef void (*HSBoolMsgSend)(id, SEL, BOOL);
 typedef BOOL (*HSBoolNoArgumentIMP)(id, SEL);
 typedef BOOL (*HSBoolObjectIMP)(id, SEL, id);
 typedef long long (*HSLongLongNoArgumentIMP)(id, SEL);
+typedef id (*HSObjectObjectIMP)(id, SEL, id);
 
 @interface HSPhotoCacheFileEntry : NSObject
 @property(nonatomic, copy) NSString *path;
@@ -40,6 +41,7 @@ typedef long long (*HSLongLongNoArgumentIMP)(id, SEL);
 @end
 
 static HSParserIMP HSOriginalParser = NULL;
+static HSObjectObjectIMP HSOriginalItemForPath = NULL;
 static HSReloadIMP HSOriginalReload = NULL;
 static HSVMsgSend HSOriginalReloadGrid = NULL;
 static HSObjectSetterIMP HSOriginalSetImage = NULL;
@@ -79,6 +81,7 @@ static dispatch_semaphore_t HSPhotoImageSemaphore;
 static NSUInteger HSPhotoLibraryParseGeneration = 0;
 static BOOL HSPhotoCacheCleanupScheduled = NO;
 static BOOL HSSwizzledParser = NO;
+static BOOL HSSwizzledItemForPath = NO;
 static BOOL HSSwizzledReload = NO;
 static BOOL HSSwizzledReloadGrid = NO;
 static BOOL HSSwizzledPhotoItemImageSetter = NO;
@@ -661,6 +664,19 @@ static void HSUpdatePhotoLoading(id controller) {
     HSSetPhotoLoadingVisible(controller, HSPhotoLoadingTextForController(controller));
 }
 
+static id HSItemForPath(id self, __unused SEL _cmd, id path) {
+    if (!path) {
+        return nil;
+    }
+
+    id pathDict = HSValueForKey(self, @"pathDict");
+    if (![pathDict isKindOfClass:[NSDictionary class]]) {
+        return HSOriginalItemForPath ? HSOriginalItemForPath(self, _cmd, path) : nil;
+    }
+
+    return [pathDict objectForKey:path];
+}
+
 static void HSParserPhotoLibraryData(id self, SEL _cmd, id photoLibraryData) {
     if (!HSOriginalParser) {
         return;
@@ -1145,6 +1161,14 @@ static void HSInstallPhotoLibraryAsyncPatch(void) {
                                                        (IMP *)&HSOriginalParser);
         }
 
+        Class albumClass = NSClassFromString(@"SFPhotoAlbumViewModel");
+        if (albumClass && !HSSwizzledItemForPath) {
+            HSSwizzledItemForPath = HSSwizzleInstanceMethodOnce(albumClass,
+                                                                NSSelectorFromString(@"itemForPath:"),
+                                                                (IMP)HSItemForPath,
+                                                                (IMP *)&HSOriginalItemForPath);
+        }
+
         Class photoViewControllerClass = NSClassFromString(@"SFPhotoViewController");
         if (photoViewControllerClass && !HSSwizzledReload) {
             HSSwizzledReload = HSSwizzleInstanceMethod(photoViewControllerClass,
@@ -1162,10 +1186,10 @@ static void HSInstallPhotoLibraryAsyncPatch(void) {
         HSInstallPhotoItemRenderPatch();
         HSInstallAlbumCoverPatch();
 
-        if (HSSwizzledParser && HSSwizzledReload && HSSwizzledReloadGrid && HSSwizzledPhotoItemImageSetter && HSSwizzledAlbumSquareImage && !HSLoggedInstall) {
+        if (HSSwizzledParser && HSSwizzledItemForPath && HSSwizzledReload && HSSwizzledReloadGrid && HSSwizzledPhotoItemImageSetter && HSSwizzledAlbumSquareImage && !HSLoggedInstall) {
             HSLoggedInstall = YES;
             HSSchedulePhotoCacheCleanup(@"patch-installed");
-            NSLog(@"[HandShakerMaintained] Photo library async/image-cache/album-cover-cache/cache-cleanup patch installed");
+            NSLog(@"[HandShakerMaintained] Photo library async/path-index/image-cache/album-cover-cache/cache-cleanup patch installed");
         }
     } @catch (NSException *exception) {
         NSLog(@"[HandShakerMaintained] Photo library patch install failed: %@", exception);
