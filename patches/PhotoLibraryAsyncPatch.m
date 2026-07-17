@@ -11,6 +11,7 @@ typedef void (*HSReloadIMP)(id, SEL, BOOL, id);
 typedef void (*HSObjectSetterIMP)(id, SEL, id);
 typedef void (*HSVMsgSend)(id, SEL);
 typedef id (*HSInitMsgSend)(id, SEL);
+typedef id (*HSQRCodeImageIMP)(id, SEL, id, CGFloat);
 typedef id (*HSIdLongLongMsgSend)(id, SEL, long long);
 typedef void (*HSSetMaskIMP)(id, SEL, NSUInteger);
 typedef id (*HSUSBHandshakeIMP)(id, SEL, int);
@@ -60,6 +61,7 @@ static HSInitMsgSend HSOriginalSyncConfigViewInit = NULL;
 static HSInitMsgSend HSOriginalSyncConfigWindowInit = NULL;
 static HSVMsgSend HSOriginalSyncConfigOpenWindow = NULL;
 static HSInitMsgSend HSOriginalVideoAllowedFileTypes = NULL;
+static HSQRCodeImageIMP HSOriginalQRCodeImage = NULL;
 static HSBoolObjectIMP HSOriginalIsSupportedVideoExt = NULL;
 static __weak id HSLastPhotoViewController = nil;
 static char HSPreparedPhotoImageKey;
@@ -89,6 +91,7 @@ static BOOL HSSwizzledPreferences = NO;
 static BOOL HSSwizzledPhotoSyncPromptDiagnostics = NO;
 static BOOL HSSwizzledVideoAllowedFileTypes = NO;
 static BOOL HSSwizzledSupportedVideoExt = NO;
+static BOOL HSSwizzledQRCodeImage = NO;
 static BOOL HSRegisteredLegacyPromptDefaults = NO;
 static BOOL HSLoggedInstall = NO;
 static BOOL HSDiagnosticsLogged = NO;
@@ -99,6 +102,8 @@ static const unsigned long long HSPhotoCacheLowDiskMaxBytes = 512ULL * 1024ULL *
 static const unsigned long long HSPhotoCacheLowDiskTargetBytes = 384ULL * 1024ULL * 1024ULL;
 static const unsigned long long HSPhotoCacheLowDiskFreeBytes = 10ULL * 1024ULL * 1024ULL * 1024ULL;
 static const int HSUSBHandshakeTimeoutMilliseconds = 15000;
+static NSString *const HSLegacyAndroidDownloadURL = @"http://t.tt/apps/handshaker?qr=1";
+static NSString *const HSAndroidReleaseURL = @"https://github.com/rianlu/handshaker-android-maintained/releases/latest";
 
 static void HSCallIfResponds(id target, SEL selector) {
     if (target && [target respondsToSelector:selector]) {
@@ -1076,6 +1081,27 @@ static void HSInstallVideoFormatPatch(void) {
     }
 }
 
+static id HSQRCodeImage(id self, SEL _cmd, id value, CGFloat size) {
+    id resolvedValue = [value isKindOfClass:[NSString class]] && [value isEqualToString:HSLegacyAndroidDownloadURL]
+        ? HSAndroidReleaseURL
+        : value;
+    return HSOriginalQRCodeImage ? HSOriginalQRCodeImage(self, _cmd, resolvedValue, size) : nil;
+}
+
+static void HSInstallAndroidReleaseURLPatch(void) {
+    if (HSSwizzledQRCodeImage) {
+        return;
+    }
+
+    HSSwizzledQRCodeImage = HSSwizzleInstanceMethodOnce(object_getClass([NSImage class]),
+                                                         NSSelectorFromString(@"codeImageWithString:size:"),
+                                                         (IMP)HSQRCodeImage,
+                                                         (IMP *)&HSOriginalQRCodeImage);
+    if (HSSwizzledQRCodeImage) {
+        NSLog(@"[HandShakerMaintained] Android QR URL updated to %@", HSAndroidReleaseURL);
+    }
+}
+
 static void HSInstallPhotoItemRenderPatch(void) {
     Class itemClass = NSClassFromString(@"SFPhotoItemView");
     if (!itemClass) {
@@ -1268,6 +1294,7 @@ static void HSPhotoLibraryAsyncPatchEntry(void) {
         HSInstallPreferencesPatch();
         HSInstallPhotoSyncPromptDiagnostics();
         HSInstallVideoFormatPatch();
+        HSInstallAndroidReleaseURLPatch();
         HSInstallPhotoLibraryAsyncPatch();
         HSScheduleLegacyReporterTeardown();
 
@@ -1279,6 +1306,7 @@ static void HSPhotoLibraryAsyncPatchEntry(void) {
             HSInstallPreferencesPatch();
             HSInstallPhotoSyncPromptDiagnostics();
             HSInstallVideoFormatPatch();
+            HSInstallAndroidReleaseURLPatch();
             HSInstallPhotoLibraryAsyncPatch();
         }];
     });

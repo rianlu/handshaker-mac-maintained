@@ -7,7 +7,7 @@ BUILD_DIR="build"
 DMG_ASSETS_DIR="assets/dmg"
 RELEASE_CONFIG_FILE="./release.conf"
 SMARTFINDER_CORE_PATCH_SCRIPT="./patches/build_smartfinder_core_wrapper.sh"
-ANDROID_RELEASE_MANIFEST_DEFAULT="../handshaker-android-maintained/build/release/handshaker-android-release.env"
+ANDROID_RELEASE_URL="https://github.com/rianlu/handshaker-android-maintained/releases/latest"
 
 fail() {
   printf '%s\n' "FAIL: $1" >&2
@@ -72,26 +72,46 @@ apply_release_version() {
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${RELEASE_BUILD_NUMBER}" "${info_plist}"
 }
 
-sync_android_apk() {
-  local manifest_path="${HANDSHAKER_ANDROID_RELEASE_MANIFEST:-${ANDROID_RELEASE_MANIFEST_DEFAULT}}"
-  local target_apk="${APP_TEMPLATE_DIR}/Contents/Frameworks/SmartFinderCore.framework/Versions/A/Resources/SmartFolder.apk"
-  local actual_sha256
+patch_accessory_download_url() {
+  local executable_path="${BUILD_DIR}/HandShaker.app/Contents/Frameworks/SmartFinderCore.framework/Versions/A/SmartFinderCore"
 
-  require_file "${manifest_path}"
-  # shellcheck disable=SC1090
-  . "${manifest_path}"
-  : "${HANDSHAKER_ANDROID_APK:?missing HANDSHAKER_ANDROID_APK in ${manifest_path}}"
-  : "${HANDSHAKER_ANDROID_VERSION_NAME:?missing HANDSHAKER_ANDROID_VERSION_NAME in ${manifest_path}}"
-  : "${HANDSHAKER_ANDROID_VERSION_CODE:?missing HANDSHAKER_ANDROID_VERSION_CODE in ${manifest_path}}"
-  : "${HANDSHAKER_ANDROID_SHA256:?missing HANDSHAKER_ANDROID_SHA256 in ${manifest_path}}"
+  require_file "${executable_path}"
+  EXECUTABLE_PATH="${executable_path}" ANDROID_RELEASE_URL="${ANDROID_RELEASE_URL}" perl <<'PERL' || fail "failed to update Android release URL"
+use strict;
+use warnings;
 
-  require_file "${HANDSHAKER_ANDROID_APK}"
-  actual_sha256="$(shasum -a 256 "${HANDSHAKER_ANDROID_APK}" | awk '{print $1}')"
-  [ "${actual_sha256}" = "${HANDSHAKER_ANDROID_SHA256}" ] || fail "Android APK SHA-256 mismatch"
+my $path = $ENV{EXECUTABLE_PATH};
+my $url = $ENV{ANDROID_RELEASE_URL};
+my $url_offset = 0x290680;
+my $pointer_offset = 0x2b2fa8;
+my $length_offset = 0x2b2fb0;
+my $legacy_url = 'http://sf.smartisan.com/sf/release/apk';
 
-  cp "${HANDSHAKER_ANDROID_APK}" "${target_apk}"
-  printf '%s\n' "Android APK: ${HANDSHAKER_ANDROID_VERSION_NAME} (${HANDSHAKER_ANDROID_VERSION_CODE})"
-  printf '%s\n' "Android APK SHA-256: ${actual_sha256}"
+open my $file, '+<', $path or die "cannot open $path: $!\n";
+binmode $file;
+
+seek $file, 0x26bfcb, 0 or die "cannot seek to legacy URL: $!\n";
+read $file, my $actual_legacy_url, length($legacy_url) or die "cannot read legacy URL: $!\n";
+die "unexpected legacy Android URL\n" unless $actual_legacy_url eq $legacy_url;
+
+seek $file, $url_offset, 0 or die "cannot seek to URL storage: $!\n";
+read $file, my $storage, length($url) + 1 or die "cannot read URL storage: $!\n";
+die "Android URL storage is not empty\n" unless $storage eq "\0" x (length($url) + 1);
+seek $file, $url_offset, 0 or die "cannot seek to URL storage: $!\n";
+print {$file} $url, "\0" or die "cannot write Android URL: $!\n";
+
+seek $file, $pointer_offset, 0 or die "cannot seek to URL pointer: $!\n";
+read $file, my $pointer, 8 or die "cannot read URL pointer: $!\n";
+die "unexpected Android URL pointer\n" unless $pointer eq pack('Q<', 0x26bfcb);
+seek $file, $pointer_offset, 0 or die "cannot seek to URL pointer: $!\n";
+print {$file} pack('Q<', $url_offset) or die "cannot write URL pointer: $!\n";
+
+seek $file, $length_offset, 0 or die "cannot seek to URL length: $!\n";
+read $file, my $length, 8 or die "cannot read URL length: $!\n";
+die "unexpected Android URL length\n" unless $length eq pack('Q<', length($legacy_url));
+seek $file, $length_offset, 0 or die "cannot seek to URL length: $!\n";
+print {$file} pack('Q<', length($url)) or die "cannot write URL length: $!\n";
+PERL
 }
 
 patch_legacy_nib_button() {
@@ -137,11 +157,6 @@ require_command codesign
 require_command create-dmg
 require_command lipo
 require_command perl
-require_command shasum
-require_command awk
-
-echo "📱 正在同步 Android 正式 APK..."
-sync_android_apk
 
 if [ -f "${SMARTFINDER_CORE_PATCH_SCRIPT}" ]; then
   echo "🧩 正在应用 SmartFinderCore 运行时补丁..."
@@ -155,6 +170,9 @@ mkdir -p "${BUILD_DIR}/HandShaker.app"
 
 # 2. 注入灵魂
 cp -R "${APP_TEMPLATE_DIR}/Contents" "${BUILD_DIR}/HandShaker.app/"
+
+echo "🔗 正在更新 Android 发布页地址..."
+patch_accessory_download_url
 
 # 2.1 避免系统 SearchFoundation.SFButton 与 HandShaker.SFButton 同名冲突
 echo "🛠️ 正在修复旧版界面兼容性..."

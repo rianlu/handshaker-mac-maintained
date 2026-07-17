@@ -64,7 +64,7 @@
 ```
 
 版本号统一在 `release.conf` 中维护. DMG 输出到 `build/`.
-构建前先运行 Android 仓库的 `./tools/build_release.sh`. Mac 构建会读取其发布清单, 校验版本和 SHA-256, 并将同一份正式 APK 内置为 `SmartFolder.apk`.
+Mac 包内保留原版 `SmartFolder.apk` 作为旧 ADB 转发兼容组件. Android 主程序由用户从维护版 Releases 页面独立安装.
 
 ## 仓库结构
 
