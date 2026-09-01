@@ -222,7 +222,7 @@ collect_android_usb_evidence() {
 
   if ! adb_online; then
     close_handshaker || true
-    printf '%s\n' "AOA 阶段 ADB 已断开. 问题已经复现, 不需要重做."
+    printf '%s\n' "USB 连接过程中 ADB 已断开——问题刚好被记录到了. 不需要重新测试."
     printf '%s\n' "现在只需拔下数据线再插入一次, 等手机重新出现 USB 调试授权或文件传输状态."
     press_enter "重新插好并允许 USB 调试后按回车, 脚本会等待设备恢复..."
     for _ in {1..60}; do
@@ -690,7 +690,7 @@ collect_usb() {
   rm -f "${stop_file}" "${usb_stop_file}"
 
   say_step "USB 诊断"
-  printf '%s\n' "正式测试前会先验证 Android 诊断日志. 前置检查不通过时不会浪费一次复现."
+  printf '%s\n' "正式测试前会先验证 Android 诊断日志. 前置检查不通过时不会开始测试，避免白测一次."
   printf '%s\n' "1. 先把手机连接到这台 Mac, 开启 USB 调试并允许这台 Mac."
   printf '%s\n' "2. 脚本会自动安装同包内诊断版 Android HandShaker, 保留应用数据."
   printf '%s\n' "3. 前置检查完成后再按提示拔线, 正式测试只需插线一次."
@@ -761,9 +761,10 @@ collect_usb() {
     printf 'start_local=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'start_epoch=%s\n' "$(date '+%s')"
   } >"${scenario_dir}/test-window.txt"
-  printf '%s\n' "现在只插线一次, 按平时方式允许手机上的 USB 配件弹窗."
-  printf '%s\n' "出现连接成功或失败后按回车. 如果一直没结果, 等 30 秒后按回车."
-  press_enter "插线并复现后按回车结束正式采集..."
+  printf '%s\n' "现在把手机数据线插到 Mac 上（只插这一次，不要反复插拔）。"
+  printf '%s\n' "插上后手机会弹出“允许 USB 配件”的弹窗，像平时那样点允许。"
+  printf '%s\n' "然后等手机或 Mac 出现连接结果（连上或失败都算）——最多等 30 秒。"
+  press_enter "看到结果后（或等了 30 秒仍无反应），回到这里按回车结束采集..."
   {
     printf 'end_local=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'end_epoch=%s\n' "$(date '+%s')"
@@ -822,7 +823,7 @@ collect_wifi() {
   start_log_monitor "${scenario_dir}" "wifi"
   start_sampler "${scenario_dir}" "${stop_file}"
   start_bonjour_monitor "${scenario_dir}" "${bonjour_stop_file}"
-  press_enter "现在请复现 Wi-Fi 问题. 复现后按回车结束 Wi-Fi 采集..."
+  press_enter "现在照平时的方式连接 Wi-Fi（出现平时的问题后）——最多等 30 秒，然后回到这里按回车..."
   screencapture -x "${scenario_dir}/mac-screen-after-repro.png" >/dev/null 2>&1 || true
   capture_app_state "${scenario_dir}" "after-repro"
   stop_sampler "${sampler_pid}" "${stop_file}"
