@@ -1291,20 +1291,27 @@ static void HSInstallUSBHandshakePatch(void) {
     }
 }
 
-static void HSDeviceManagerMatchingAdded(id self, SEL _cmd, id device) {
+static void HSDeviceManagerMatchingAdded(id self, SEL _cmd, void *argument) {
+    // matchingDeviceAdded: 实参已实测为 SFUSBDevice 实例 (beta13 真机日志验证).
+    // 与 Removed 同样以 void * 接收, 规避 ARC 序言 retain; 在此转回 id 使用.
+    id device = (__bridge id)argument;
     HSLogUSBDiagnostic(@"event=DEVICE_ADDED device=%@ %@",
                        device,
                        HSUSBDeviceStateDescription(device));
     if (HSOriginalDeviceAdded) {
-        ((void (*)(id, SEL, id))HSOriginalDeviceAdded)(self, _cmd, device);
+        ((void (*)(id, SEL, void *))HSOriginalDeviceAdded)(self, _cmd, argument);
     }
 }
 
-static void HSDeviceManagerMatchingRemoved(id self, SEL _cmd, id device) {
-    HSLogUSBDiagnostic(@"event=DEVICE_REMOVED device=%@",
-                       device);
+static void HSDeviceManagerMatchingRemoved(id self, SEL _cmd, void *argument) {
+    // matchingDeviceRemoved: 的实参为非对象指针 (实测 0x4d555478 野指针).
+    // 参数必须声明为 void *: 若声明为 id, ARC 会在函数序言插入 objc_storeStrong
+    // 对野指针做 retain, 在任何日志代码执行前就 SIGSEGV (beta13 实测崩溃).
+    // 全程绝不向该指针发送消息或格式化为对象.
+    HSLogUSBDiagnostic(@"event=DEVICE_REMOVED argument=%p",
+                       argument);
     if (HSOriginalDeviceRemoved) {
-        ((void (*)(id, SEL, id))HSOriginalDeviceRemoved)(self, _cmd, device);
+        ((void (*)(id, SEL, void *))HSOriginalDeviceRemoved)(self, _cmd, argument);
     }
 }
 
