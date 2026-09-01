@@ -1223,10 +1223,10 @@ static void HSWarnSuperSpeedLinkIfNeeded(id device, id handshakeResult) {
         @try {
             NSAlert *alert = [[NSAlert alloc] init];
             alert.alertStyle = NSAlertStyleWarning;
-            alert.messageText = @"USB 连接失败：请改用 USB 2.0 数据线";
-            alert.informativeText = @"检测到手机以 USB 3.0 高速链路连接，本程序的 USB 驱动无法识别该速率，因此无法建立连接。\n\n"
-                                     "解决办法：换用手机原装充电线（多为 USB 2.0），或通过 USB 2.0 转接头 / 集线器连接。\n\n"
-                                     "注意：这不会降低传输速度。本程序的传输速度本身就低于 USB 2.0 的上限，换线不影响实际快慢。";
+            alert.messageText = @"USB 连接失败：请改用 USB 3.0 (5Gbps) 数据线";
+            alert.informativeText = @"检测到手机以 USB 3.1 Gen2 / USB 3.2 (10Gbps) 超高速链路连接，新版 macOS 不再为旧程序自动降速，而本程序内置的 USB 库（2015 年版）无法识别 10Gbps 速率，因此无法建立连接。\n\n"
+                                     "解决办法：换用 USB 3.0 (5Gbps) 级别的数据线或 C-to-A 转接，使链路降到 5Gbps 即可正常连接。\n\n"
+                                     "注意：5Gbps 链路不影响传输速度（可达 70MB/s 以上）；请避免使用 USB 2.0 数据线，速度会降至约 20MB/s。";
             [alert addButtonWithTitle:@"知道了"];
             [alert runModal];
         } @catch (NSException *exception) {

@@ -557,7 +557,7 @@ generate_usb_summary() {
     conclusion="Android 已收到 Mac 首包, 但未完成首次响应写入. 故障位于 Android SSP 响应生成或写线程."
   elif [ "${mac_handshake_failed}" = "1" ]; then
     if [ "${speed_unrecognized}" = "1" ] || [ "${link_superspeed}" = "1" ]; then
-      conclusion="Mac 握手返回错误, 且链路以 SuperSpeedPlus (10Gbps) 枚举, 内置 libusb 1.0.20 无法识别该速率 (Speed: Unknow). 应改用 USB 2.0 线材或 USB 2.0 转接/HUB 使链路降到 480Mbps 后重试. 实测该应用大文件吞吐低于 20MB/s, 远未用满 USB 2.0, 降速不损失传输性能."
+      conclusion="Mac 握手返回错误, 且链路以 SuperSpeedPlus (10Gbps) 枚举, 内置 libusb 1.0.20 无法识别该速率 (Speed: Unknow). 应改用 USB 3.0 (5Gbps) 级别数据线或 C-to-A 转接使链路降到 5Gbps 后重试; 5Gbps 链路实测可达 70MB/s 以上, 不影响传输速度. 应避免 USB 2.0 数据线, 实测会降至约 20MB/s."
     elif [ "${direct_out_wait}" = "1" ]; then
       conclusion="Mac 握手返回错误, 采样显示卡在直接 libusb Bulk OUT. 故障位于主机到设备的批量发送链路."
     elif [ "${direct_in_wait}" = "1" ]; then
