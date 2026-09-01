@@ -105,6 +105,9 @@ static BOOL HSSwizzledPhotoItemLifecycle = NO;
 static BOOL HSSwizzledFRLogAsking = NO;
 static BOOL HSSwizzledExceptionHandlerMasks = NO;
 static BOOL HSSwizzledUSBHandshake = NO;
+static BOOL HSSwizzledDeviceManagerCallbacks = NO;
+static IMP HSOriginalDeviceAdded = NULL;
+static IMP HSOriginalDeviceRemoved = NULL;
 static BOOL HSSwizzledPreferences = NO;
 static BOOL HSSwizzledPhotoSyncPromptDiagnostics = NO;
 static BOOL HSSwizzledVideoAllowedFileTypes = NO;
@@ -1288,6 +1291,48 @@ static void HSInstallUSBHandshakePatch(void) {
     }
 }
 
+static void HSDeviceManagerMatchingAdded(id self, SEL _cmd, id device) {
+    HSLogUSBDiagnostic(@"event=DEVICE_ADDED device=%@ %@",
+                       device,
+                       HSUSBDeviceStateDescription(device));
+    if (HSOriginalDeviceAdded) {
+        ((void (*)(id, SEL, id))HSOriginalDeviceAdded)(self, _cmd, device);
+    }
+}
+
+static void HSDeviceManagerMatchingRemoved(id self, SEL _cmd, id device) {
+    HSLogUSBDiagnostic(@"event=DEVICE_REMOVED device=%@",
+                       device);
+    if (HSOriginalDeviceRemoved) {
+        ((void (*)(id, SEL, id))HSOriginalDeviceRemoved)(self, _cmd, device);
+    }
+}
+
+static void HSInstallDeviceManagerPatch(void) {
+    Class managerClass = NSClassFromString(@"SFUSBDeviceManager");
+    if (!managerClass) {
+        return;
+    }
+
+    // 原方法在 7-9 用户日志中确认存在且被调用: -[SFUSBDeviceManager matchingDeviceAdded:]_block_invoke
+    // 与 -[SFUSBDeviceManager matchingDeviceRemoved:]. 这里对两个外层方法挂钩获得持久化日志,
+    // 弥补 AOA 就绪到握手开始之间的空窗期.
+    if (!HSSwizzledDeviceManagerCallbacks) {
+        HSSwizzleInstanceMethodOnce(managerClass,
+                                    NSSelectorFromString(@"matchingDeviceAdded:"),
+                                    (IMP)HSDeviceManagerMatchingAdded,
+                                    &HSOriginalDeviceAdded);
+        HSSwizzledDeviceManagerCallbacks =
+            HSSwizzleInstanceMethodOnce(managerClass,
+                                        NSSelectorFromString(@"matchingDeviceRemoved:"),
+                                        (IMP)HSDeviceManagerMatchingRemoved,
+                                        &HSOriginalDeviceRemoved);
+        if (HSSwizzledDeviceManagerCallbacks) {
+            HSLogUSBDiagnostic(@"event=DEVICE_MANAGER_PATCH installed=1");
+        }
+    }
+}
+
 static id HSVideoAllowedFileTypes(id self, SEL _cmd) {
     NSArray *original = HSOriginalVideoAllowedFileTypes ? HSOriginalVideoAllowedFileTypes(self, _cmd) : nil;
     NSMutableOrderedSet *types = [NSMutableOrderedSet orderedSetWithArray:[original isKindOfClass:[NSArray class]] ? original : @[]];
@@ -1539,6 +1584,7 @@ __attribute__((constructor))
 static void HSPhotoLibraryAsyncPatchEntry(void) {
     HSInstallLegacyReporterGuards(NO);
     HSInstallUSBHandshakePatch();
+    HSInstallDeviceManagerPatch();
     HSInstallPhotoSyncPromptDiagnostics();
 
     dispatch_async(dispatch_get_main_queue(), ^{

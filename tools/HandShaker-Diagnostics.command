@@ -349,7 +349,7 @@ start_usb_monitor() {
     while [ ! -f "${stop_file}" ]; do
       {
         printf '\n=== %s epoch=%s ===\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$(date '+%s')"
-        ioreg -p IOUSB -l -w0 | awk '/"USB Product Name"|"USB Vendor Name"|"USB Serial Number"|"idVendor"|"idProduct"|"locationID"|"Device Speed"/'
+        ioreg -p IOUSB -l -w0 | awk '/"USB Product Name"|"USB Vendor Name"|"USB Serial Number"|"idVendor"|"idProduct"|"locationID"|"Device Speed"|UsbLinkSpeed|USBPortType|controller-statistics|kControllerStat|ErrorCount|ErrCnt|USBDeviceErrors|kUSB.*Error/'
       } >>"${scenario_dir}/usb-enumeration-timeline.txt" 2>&1
       sleep 1
     done
