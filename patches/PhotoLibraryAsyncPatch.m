@@ -4,7 +4,10 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <limits.h>
+#import <pthread.h>
 #import <signal.h>
+#import <stdint.h>
+#import <string.h>
 
 typedef void (*HSParserIMP)(id, SEL, id);
 typedef void (*HSReloadIMP)(id, SEL, BOOL, id);
@@ -21,6 +24,17 @@ typedef BOOL (*HSBoolNoArgumentIMP)(id, SEL);
 typedef BOOL (*HSBoolObjectIMP)(id, SEL, id);
 typedef long long (*HSLongLongNoArgumentIMP)(id, SEL);
 typedef id (*HSObjectObjectIMP)(id, SEL, id);
+
+struct HSLibusbVersion {
+    uint16_t major;
+    uint16_t minor;
+    uint16_t micro;
+    uint16_t nano;
+    const char *rc;
+    const char *describe;
+};
+
+typedef const struct HSLibusbVersion *(*HSLibusbGetVersionIMP)(void);
 
 @interface HSPhotoCacheFileEntry : NSObject
 @property(nonatomic, copy) NSString *path;
@@ -74,6 +88,7 @@ static char HSPhotoItemLastImageKey;
 static char HSPhotoItemConfiguredKey;
 static char HSPhotoItemSourceImageKey;
 static char HSAlbumSquareImageKey;
+static char HSUSBHandshakeSessionKey;
 static dispatch_queue_t HSPhotoParserQueue;
 static dispatch_queue_t HSPhotoCacheCleanupQueue;
 static dispatch_queue_t HSPhotoImageQueue;
@@ -96,6 +111,7 @@ static BOOL HSSwizzledVideoAllowedFileTypes = NO;
 static BOOL HSSwizzledSupportedVideoExt = NO;
 static BOOL HSSwizzledQRCodeImage = NO;
 static BOOL HSRegisteredLegacyPromptDefaults = NO;
+static BOOL HSWarnedSuperSpeedLink = NO;
 static BOOL HSLoggedInstall = NO;
 static BOOL HSDiagnosticsLogged = NO;
 
@@ -104,6 +120,7 @@ static const unsigned long long HSPhotoCacheDefaultTargetBytes = 1536ULL * 1024U
 static const unsigned long long HSPhotoCacheLowDiskMaxBytes = 512ULL * 1024ULL * 1024ULL;
 static const unsigned long long HSPhotoCacheLowDiskTargetBytes = 384ULL * 1024ULL * 1024ULL;
 static const unsigned long long HSPhotoCacheLowDiskFreeBytes = 10ULL * 1024ULL * 1024ULL * 1024ULL;
+static const unsigned long long HSUSBDiagnosticMaxBytes = 1024ULL * 1024ULL;
 static const int HSUSBHandshakeTimeoutMilliseconds = 15000;
 static NSString *const HSLegacyAndroidDownloadURL = @"http://t.tt/apps/handshaker?qr=1";
 static NSString *const HSAndroidReleaseURL = @"https://github.com/rianlu/handshaker-android-maintained/releases/latest";
@@ -210,6 +227,62 @@ static void HSLogPhotoSyncPrompt(NSString *format, ...) {
         [file seekToEndOfFile];
         [file writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
         [file closeFile];
+    }
+}
+
+static void HSLogUSBDiagnostic(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+
+static void HSLogUSBDiagnostic(NSString *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
+    va_end(arguments);
+
+    message = [[message stringByReplacingOccurrencesOfString:@"\r" withString:@" "]
+               stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    NSString *threadName = [NSThread currentThread].name;
+    if (!threadName.length) {
+        threadName = [NSString stringWithFormat:@"%@", [NSThread currentThread]];
+    }
+    uint64_t threadId = 0;
+    pthread_threadid_np(NULL, &threadId);
+    NSString *line = [NSString stringWithFormat:@"%@ uptime=%.3f pid=%d tid=%llu thread=%@ %@\n",
+                      [NSDate date],
+                      [NSProcessInfo processInfo].systemUptime,
+                      [NSProcessInfo processInfo].processIdentifier,
+                      (unsigned long long)threadId,
+                      threadName,
+                      message];
+    NSLog(@"[HandShakerMaintained] [USBDiagnostic] %@", message);
+
+    NSString *logDirectory = [HSHandShakerApplicationSupportPath() stringByAppendingPathComponent:@"logs"];
+    NSString *logPath = [logDirectory stringByAppendingPathComponent:@"usb-diagnostic.log"];
+    if (!logPath.length) {
+        return;
+    }
+
+    @try {
+        @synchronized([NSFileHandle class]) {
+            NSFileManager *fileManager = [NSFileManager defaultManager];
+            [fileManager createDirectoryAtPath:logDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+
+            NSNumber *fileSize = [[fileManager attributesOfItemAtPath:logPath error:nil] objectForKey:NSFileSize];
+            if ([fileSize unsignedLongLongValue] >= HSUSBDiagnosticMaxBytes) {
+                NSString *previousPath = [logPath stringByAppendingString:@".previous"];
+                [fileManager removeItemAtPath:previousPath error:nil];
+                [fileManager moveItemAtPath:logPath toPath:previousPath error:nil];
+            }
+            if (![fileManager fileExistsAtPath:logPath]) {
+                [fileManager createFileAtPath:logPath contents:nil attributes:nil];
+            }
+
+            NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:logPath];
+            [file seekToEndOfFile];
+            [file writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [file closeFile];
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[HandShakerMaintained] [USBDiagnostic] log write failed: %@", exception);
     }
 }
 
@@ -1034,29 +1107,184 @@ static void HSInstallPreferencesPatch(void) {
     }
 }
 
+static NSString *HSUSBHandshakeSession(id device) {
+    id value = objc_getAssociatedObject(device, &HSUSBHandshakeSessionKey);
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+static void *HSUSBPointerIvar(id device, const char *name) {
+    Ivar ivar = device ? class_getInstanceVariable(object_getClass(device), name) : NULL;
+    if (!ivar) {
+        return NULL;
+    }
+
+    void *value = NULL;
+    const char *bytes = (const char *)(__bridge const void *)device;
+    memcpy(&value, bytes + ivar_getOffset(ivar), sizeof(value));
+    return value;
+}
+
+static NSString *HSLibusbVersionDescription(void) {
+    HSLibusbGetVersionIMP getVersion = (HSLibusbGetVersionIMP)dlsym(RTLD_DEFAULT, "libusb_get_version");
+    const struct HSLibusbVersion *version = getVersion ? getVersion() : NULL;
+    if (!version) {
+        return @"unavailable";
+    }
+
+    NSString *suffix = version->rc ? [NSString stringWithUTF8String:version->rc] : @"";
+    NSString *description = version->describe ? [NSString stringWithUTF8String:version->describe] : @"";
+    return [NSString stringWithFormat:@"%u.%u.%u.%u rc=%@ describe=%@",
+            version->major, version->minor, version->micro, version->nano,
+            suffix ?: @"", description ?: @""];
+}
+
+static NSString *HSUSBDeviceStateDescription(id device) {
+    return [NSString stringWithFormat:@"class=%@ device=%@ accessory=%@ bus=%@ port=%@ path=%@ speed=%@ maxIn=%@ maxOut=%@ readRunning=%@ readCanceled=%@ handle=%p interface=%p bulkIn=%p bulkOut=%p libusb=%@",
+            NSStringFromClass([device class]),
+            device,
+            HSValueForKey(device, @"isInAccessoryMode") ?: @"<nil>",
+            HSValueForKey(device, @"busNumber") ?: @"<nil>",
+            HSValueForKey(device, @"portNumber") ?: @"<nil>",
+            HSValueForKey(device, @"portPath") ?: @"<nil>",
+            HSValueForKey(device, @"speed") ?: @"<nil>",
+            HSValueForKey(device, @"maxInPacketSize") ?: @"<nil>",
+            HSValueForKey(device, @"maxOutPacketSize") ?: @"<nil>",
+            HSValueForKey(device, @"readThreadRunning") ?: @"<nil>",
+            HSValueForKey(device, @"readThreadCanceled") ?: @"<nil>",
+            HSUSBPointerIvar(device, "handle"),
+            HSUSBPointerIvar(device, "the_interface"),
+            HSUSBPointerIvar(device, "bulkIn_ep"),
+            HSUSBPointerIvar(device, "bulkOut_ep"),
+            HSLibusbVersionDescription()];
+}
+
+static BOOL HSVerifyUSBHandshakeBulkCallsites(Class deviceClass) {
+    Method method = class_getInstanceMethod(deviceClass, NSSelectorFromString(@"sendHandShakeRequestWithMSTimeout:"));
+    uint8_t *implementation = method ? (uint8_t *)method_getImplementation(method) : NULL;
+    uint8_t *bulkTransfer = (uint8_t *)dlsym(RTLD_DEFAULT, "libusb_bulk_transfer");
+    const char *methodTypes = method ? method_getTypeEncoding(method) : NULL;
+    static const NSUInteger returnOffsets[] = {858, 1018, 1580, 2510};
+
+    if (!implementation || !bulkTransfer || !methodTypes || strcmp(methodTypes, "@20@0:8i16") != 0) {
+        HSLogUSBDiagnostic(@"event=HANDSHAKE_CALLSITE_MAP verified=0 method=%p libusbBulk=%p types=%s reason=signature-or-symbol",
+                           implementation, bulkTransfer, methodTypes ?: "<nil>");
+        return NO;
+    }
+
+    for (NSUInteger index = 0; index < sizeof(returnOffsets) / sizeof(returnOffsets[0]); index += 1) {
+        uint8_t *call = implementation + returnOffsets[index] - 5;
+        int32_t displacement = 0;
+        memcpy(&displacement, call + 1, sizeof(displacement));
+        uint8_t *target = call + 5 + displacement;
+        if (call[0] != 0xe8 || target != bulkTransfer) {
+            HSLogUSBDiagnostic(@"event=HANDSHAKE_CALLSITE_MAP verified=0 index=%lu returnOffset=%lu opcode=0x%02x target=%p expected=%p",
+                               (unsigned long)index,
+                               (unsigned long)returnOffsets[index],
+                               call[0],
+                               target,
+                               bulkTransfer);
+            return NO;
+        }
+    }
+
+    HSLogUSBDiagnostic(@"event=HANDSHAKE_CALLSITE_MAP verified=1 method=%p libusbBulk=%p outReturnOffsets=858,1018 inReturnOffsets=1580,2510",
+                       implementation, bulkTransfer);
+    return YES;
+}
+
+static void HSWarnSuperSpeedLinkIfNeeded(id device, id handshakeResult) {
+    // Only warn when the handshake actually failed AND libusb could not name the
+    // link speed. The bundled libusb 1.0.20 has no SuperSpeedPlus enum, so a
+    // 10Gbps link reports speed 0 and its bulk OUT never completes.
+    if (HSWarnedSuperSpeedLink) {
+        return;
+    }
+
+    NSString *resultText = [handshakeResult isKindOfClass:[NSString class]] ? (NSString *)handshakeResult : nil;
+    BOOL handshakeFailed = (resultText == nil) || [resultText hasPrefix:@"err:"];
+    if (!handshakeFailed) {
+        return;
+    }
+
+    id speedValue = HSValueForKey(device, @"speed");
+    BOOL speedUnrecognized = ![speedValue respondsToSelector:@selector(integerValue)] ||
+                             [speedValue integerValue] == 0;
+    if (!speedUnrecognized) {
+        return;
+    }
+
+    HSWarnedSuperSpeedLink = YES;
+    HSLogUSBDiagnostic(@"event=SUPERSPEED_LINK_WARNING speed=%@ reason=handshake-failed-and-speed-unrecognized",
+                       speedValue ?: @"<nil>");
+
+    // Never block the USB thread, and never run a modal during launch: the
+    // original beachball was caused by a modal alert draining the main queue.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.alertStyle = NSAlertStyleWarning;
+            alert.messageText = @"USB 连接失败：请改用 USB 2.0 数据线";
+            alert.informativeText = @"检测到手机以 USB 3.0 高速链路连接，本程序的 USB 驱动无法识别该速率，因此无法建立连接。\n\n"
+                                     "解决办法：换用手机原装充电线（多为 USB 2.0），或通过 USB 2.0 转接头 / 集线器连接。\n\n"
+                                     "注意：这不会降低传输速度。本程序的传输速度本身就低于 USB 2.0 的上限，换线不影响实际快慢。";
+            [alert addButtonWithTitle:@"知道了"];
+            [alert runModal];
+        } @catch (NSException *exception) {
+            HSLogUSBDiagnostic(@"event=SUPERSPEED_LINK_WARNING_FAILED exception=%@", exception);
+        }
+    });
+}
+
 static id HSSendUSBHandshake(id self, SEL _cmd, int timeout) {
     int effectiveTimeout = timeout > 0 ? timeout : HSUSBHandshakeTimeoutMilliseconds;
+    NSString *session = [NSUUID UUID].UUIDString;
     CFAbsoluteTime startedAt = CFAbsoluteTimeGetCurrent();
-    NSLog(@"[HandShakerMaintained] USB handshake started requestedTimeout=%d effectiveTimeout=%d", timeout, effectiveTimeout);
-    id result = HSOriginalUSBHandshake ? HSOriginalUSBHandshake(self, _cmd, effectiveTimeout) : nil;
-    NSLog(@"[HandShakerMaintained] USB handshake finished elapsed=%.3fs result=%@",
-          CFAbsoluteTimeGetCurrent() - startedAt,
-          result);
-    return result;
+    objc_setAssociatedObject(self, &HSUSBHandshakeSessionKey, session, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    HSLogUSBDiagnostic(@"session=%@ event=HANDSHAKE_BEGIN requestedTimeoutMs=%d effectiveTimeoutMs=%d %@",
+                       session, timeout, effectiveTimeout, HSUSBDeviceStateDescription(self));
+
+    @try {
+        id result = HSOriginalUSBHandshake ? HSOriginalUSBHandshake(self, _cmd, effectiveTimeout) : nil;
+        HSLogUSBDiagnostic(@"session=%@ event=HANDSHAKE_END elapsedMs=%.3f resultPresent=%d resultClass=%@ result=%@ %@",
+                           session,
+                           (CFAbsoluteTimeGetCurrent() - startedAt) * 1000.0,
+                           result != nil,
+                           result ? NSStringFromClass([result class]) : @"<nil>",
+                           result ?: @"<nil>",
+                           HSUSBDeviceStateDescription(self));
+        HSWarnSuperSpeedLinkIfNeeded(self, result);
+        return result;
+    } @catch (NSException *exception) {
+        HSLogUSBDiagnostic(@"session=%@ event=HANDSHAKE_EXCEPTION elapsedMs=%.3f exception=%@ %@",
+                           session,
+                           (CFAbsoluteTimeGetCurrent() - startedAt) * 1000.0,
+                           exception,
+                           HSUSBDeviceStateDescription(self));
+        @throw;
+    } @finally {
+        if ([HSUSBHandshakeSession(self) isEqualToString:session]) {
+            objc_setAssociatedObject(self, &HSUSBHandshakeSessionKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        }
+    }
 }
 
 static void HSInstallUSBHandshakePatch(void) {
     Class deviceClass = NSClassFromString(@"SFUSBDevice");
-    if (!deviceClass || HSSwizzledUSBHandshake) {
+    if (!deviceClass) {
         return;
     }
 
-    HSSwizzledUSBHandshake = HSSwizzleInstanceMethodOnce(deviceClass,
-                                                         NSSelectorFromString(@"sendHandShakeRequestWithMSTimeout:"),
-                                                         (IMP)HSSendUSBHandshake,
-                                                         (IMP *)&HSOriginalUSBHandshake);
-    if (HSSwizzledUSBHandshake) {
-        NSLog(@"[HandShakerMaintained] USB handshake timeout patch installed timeout=%dms", HSUSBHandshakeTimeoutMilliseconds);
+    BOOL callsitesVerified = HSVerifyUSBHandshakeBulkCallsites(deviceClass);
+    if (!HSSwizzledUSBHandshake) {
+        HSSwizzledUSBHandshake = HSSwizzleInstanceMethodOnce(deviceClass,
+                                                             NSSelectorFromString(@"sendHandShakeRequestWithMSTimeout:"),
+                                                             (IMP)HSSendUSBHandshake,
+                                                             (IMP *)&HSOriginalUSBHandshake);
+    }
+
+    if (HSSwizzledUSBHandshake && callsitesVerified) {
+        HSLogUSBDiagnostic(@"event=PATCH_INSTALL handshake=1 callsiteMap=1 timeoutMs=%d",
+                           HSUSBHandshakeTimeoutMilliseconds);
     }
 }
 

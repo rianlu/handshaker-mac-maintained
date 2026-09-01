@@ -3,17 +3,21 @@
 set -u
 
 timestamp="$(date '+%Y%m%d-%H%M%S')"
+script_dir="${0:A:h}"
 out_dir="${HOME}/Desktop/HandShaker-Diagnostics-${timestamp}"
 common_dir="${out_dir}/common"
 app_name="HandShaker"
 app_path="/Applications/HandShaker.app"
 app_executable="${app_path}/Contents/MacOS/HandShaker"
+android_package="com.smartisanos.smartfolder.aoa"
+android_external_dir="/sdcard/Android/data/${android_package}/files"
+diagnostic_apk="${script_dir}/HandShaker-Android-USB-Diagnostic.apk"
+adb_path=""
+adb_serial=""
 sampler_pid=""
 usb_monitor_pid=""
 bonjour_monitor_pid=""
 log_monitor_pid=""
-
-mkdir -p "${common_dir}"
 
 say_step() {
   printf '\n%s\n' "$1"
@@ -60,16 +64,177 @@ ask_choice() {
   printf '%s\n' "${answer}" >"${output}"
 }
 
+find_adb() {
+  local candidate
+
+  for candidate in \
+    "${script_dir}/platform-tools/adb" \
+    "${script_dir}/adb" \
+    "${HOME}/Library/Android/sdk/platform-tools/adb"; do
+    if [ -x "${candidate}" ]; then
+      adb_path="${candidate}"
+      return 0
+    fi
+  done
+
+  candidate="$(command -v adb 2>/dev/null || true)"
+  if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+    adb_path="${candidate}"
+    return 0
+  fi
+
+  return 1
+}
+
+adb_online() {
+  [ -n "${adb_path}" ] && [ -n "${adb_serial}" ] && \
+    [ "$("${adb_path}" -s "${adb_serial}" get-state 2>/dev/null || true)" = "device" ]
+}
+
+adb_capture() {
+  local output="$1"
+  shift
+  run_capture "${output}" "${adb_path}" -s "${adb_serial}" "$@"
+}
+
+select_adb_device() {
+  local output_dir="$1"
+  local listing usb_serials serial_count
+
+  listing="$("${adb_path}" devices -l 2>&1)"
+  printf '%s\n' "${listing}" >"${output_dir}/adb-devices.txt"
+  usb_serials="$(printf '%s\n' "${listing}" | awk 'NR > 1 && $2 == "device" && $0 ~ / usb:/ {print $1}')"
+  serial_count="$(printf '%s\n' "${usb_serials}" | awk 'NF {count++} END {print count + 0}')"
+  if [ "${serial_count}" = "1" ]; then
+    adb_serial="${usb_serials}"
+    return 0
+  fi
+
+  return 1
+}
+
+capture_android_state() {
+  local output_dir="$1"
+  local label="$2"
+
+  mkdir -p "${output_dir}/android"
+  adb_capture "${output_dir}/android/time-${label}.txt" shell date '+%Y-%m-%dT%H:%M:%S%z'
+  adb_capture "${output_dir}/android/uptime-${label}.txt" shell cat /proc/uptime
+  adb_capture "${output_dir}/android/getprop-${label}.txt" shell getprop
+  adb_capture "${output_dir}/android/dumpsys-usb-${label}.txt" shell dumpsys usb
+  adb_capture "${output_dir}/android/usb-functions-${label}.txt" shell cmd usb get-functions
+  adb_capture "${output_dir}/android/adb-enabled-${label}.txt" shell settings get global adb_enabled
+  adb_capture "${output_dir}/android/package-${label}.txt" shell dumpsys package "${android_package}"
+  adb_capture "${output_dir}/android/services-${label}.txt" shell dumpsys activity services "${android_package}"
+  adb_capture "${output_dir}/android/activity-top-${label}.txt" shell dumpsys activity top
+  adb_capture "${output_dir}/android/processes-${label}.txt" shell ps -A
+}
+
+prepare_android_usb_diagnostics() {
+  local scenario_dir="$1"
+  local attempt install_status init_log remaining_log
+
+  mkdir -p "${scenario_dir}/android"
+  if ! find_adb; then
+    printf '%s\n' "未找到 ADB. 测试包必须包含 platform-tools/adb." | tee "${scenario_dir}/android/preflight-error.txt"
+    return 1
+  fi
+  if [ ! -f "${diagnostic_apk}" ]; then
+    printf '%s\n' "未找到诊断 APK: ${diagnostic_apk}" | tee "${scenario_dir}/android/preflight-error.txt"
+    return 1
+  fi
+
+  run_capture "${scenario_dir}/android/adb-version.txt" "${adb_path}" version
+  run_capture "${scenario_dir}/android/adb-start-server.txt" "${adb_path}" start-server
+
+  for attempt in 1 2 3; do
+    if select_adb_device "${scenario_dir}/android"; then
+      break
+    fi
+    if [ "${attempt}" = "3" ]; then
+      printf '%s\n' "ADB 预检失败: 未找到唯一的已授权物理 USB 设备." | tee "${scenario_dir}/android/preflight-error.txt"
+      return 1
+    fi
+    printf '%s\n' "请保持手机连接, 开启 USB 调试并允许这台 Mac; 如果连接了多个调试设备, 请断开其他设备."
+    press_enter "完成后按回车重新检测..."
+  done
+
+  printf '%s\n' "${adb_serial}" >"${scenario_dir}/android/adb-serial.txt"
+  {
+    printf '$ %q -s %q install -r %q\n\n' "${adb_path}" "${adb_serial}" "${diagnostic_apk}"
+    "${adb_path}" -s "${adb_serial}" install -r "${diagnostic_apk}"
+  } >"${scenario_dir}/android/apk-install.txt" 2>&1
+  install_status=$?
+  if [ "${install_status}" -ne 0 ] || ! grep -q 'Success' "${scenario_dir}/android/apk-install.txt"; then
+    printf '%s\n' "诊断 APK 安装失败, 本次 USB 测试不会开始." | tee "${scenario_dir}/android/preflight-error.txt"
+    return 1
+  fi
+
+  adb_capture "${scenario_dir}/android/app-force-stop.txt" shell am force-stop "${android_package}"
+  adb_capture "${scenario_dir}/android/old-diagnostic-log-remove.txt" shell rm -f \
+    "${android_external_dir}/handshaker-usb-diagnostic.log" \
+    "${android_external_dir}/handshaker-usb-diagnostic.log.previous"
+  remaining_log="$("${adb_path}" -s "${adb_serial}" shell ls "${android_external_dir}/handshaker-usb-diagnostic.log" 2>/dev/null || true)"
+  if [ -n "${remaining_log}" ]; then
+    printf '%s\n' "无法清空 Android 旧诊断日志, 本次 USB 测试不会开始." | tee "${scenario_dir}/android/preflight-error.txt"
+    return 1
+  fi
+  adb_capture "${scenario_dir}/android/logcat-clear.txt" logcat -c
+  adb_capture "${scenario_dir}/android/app-launch.txt" shell am start -W -n "${android_package}/.MainActivity"
+  sleep 2
+
+  init_log="$("${adb_path}" -s "${adb_serial}" shell cat "${android_external_dir}/handshaker-usb-diagnostic.log" 2>/dev/null || true)"
+  printf '%s\n' "${init_log}" >"${scenario_dir}/android/diagnostic-init-check.txt"
+  if ! printf '%s\n' "${init_log}" | grep -q 'APP_START'; then
+    printf '%s\n' "Android 持久诊断日志未生成, 本次 USB 测试不会开始." | tee "${scenario_dir}/android/preflight-error.txt"
+    return 1
+  fi
+
+  capture_android_state "${scenario_dir}" "before"
+  return 0
+}
+
+collect_android_usb_evidence() {
+  local scenario_dir="$1"
+  local android_dir="${scenario_dir}/android"
+
+  if ! adb_online; then
+    close_handshaker || true
+    printf '%s\n' "AOA 阶段 ADB 已断开. 问题已经复现, 不需要重做."
+    printf '%s\n' "现在只需拔下数据线再插入一次, 等手机重新出现 USB 调试授权或文件传输状态."
+    press_enter "重新插好并允许 USB 调试后按回车, 脚本会等待设备恢复..."
+    for _ in {1..60}; do
+      adb_online && break
+      sleep 1
+    done
+  fi
+
+  if ! adb_online; then
+    printf '%s\n' "ADB 未恢复, Android 证据无法拉取." | tee "${android_dir}/postflight-error.txt"
+    return 1
+  fi
+
+  capture_android_state "${scenario_dir}" "after"
+  adb_capture "${android_dir}/logcat-full.txt" logcat -d -b all -v threadtime
+  LC_ALL=C grep -Ei 'HandShakerUSB|HandShakerDiag|USB_ACCESSORY|Usb(Device|Host|Port|Service|Manager)|Accessory|AndroidRuntime|FATAL EXCEPTION' \
+    "${android_dir}/logcat-full.txt" >"${android_dir}/logcat-usb-focused.txt" 2>/dev/null || true
+  adb_capture "${android_dir}/persistent-log-list.txt" shell ls -la "${android_external_dir}"
+  "${adb_path}" -s "${adb_serial}" pull \
+    "${android_external_dir}/handshaker-usb-diagnostic.log" \
+    "${android_dir}/handshaker-usb-diagnostic.log" >"${android_dir}/persistent-log-pull.txt" 2>&1 || true
+  "${adb_path}" -s "${adb_serial}" pull \
+    "${android_external_dir}/handshaker-usb-diagnostic.log.previous" \
+    "${android_dir}/handshaker-usb-diagnostic.log.previous" >>"${android_dir}/persistent-log-pull.txt" 2>&1 || true
+  adb_capture "${android_dir}/persistent-log-internal.txt" exec-out run-as "${android_package}" \
+    cat files/handshaker-usb-diagnostic.log
+  return 0
+}
+
 find_app() {
   [ -d "${app_path}" ]
 }
 
-open_handshaker() {
-  if ! find_app; then
-    printf '%s\n' "未找到 /Applications/HandShaker.app. 请先打开 DMG, 将 HandShaker 拖入应用程序文件夹." | tee "${common_dir}/app-not-found.txt"
-    return 1
-  fi
-
+close_handshaker() {
   if pgrep -x "${app_name}" >/dev/null 2>&1; then
     osascript -e 'tell application "HandShaker" to quit' >/dev/null 2>&1 || true
     for _ in {1..50}; do
@@ -79,9 +244,20 @@ open_handshaker() {
   fi
 
   if pgrep -x "${app_name}" >/dev/null 2>&1; then
-    printf '%s\n' "无法正常关闭正在运行的 HandShaker. 请手动退出后重新运行诊断脚本." | tee "${common_dir}/app-still-running.txt"
+    printf '%s\n' "无法正常关闭正在运行的 HandShaker." | tee "${common_dir}/app-still-running.txt"
     return 1
   fi
+
+  return 0
+}
+
+open_handshaker() {
+  if ! find_app; then
+    printf '%s\n' "未找到 /Applications/HandShaker.app. 请先打开 DMG, 将 HandShaker 拖入应用程序文件夹." | tee "${common_dir}/app-not-found.txt"
+    return 1
+  fi
+
+  close_handshaker || return 1
 
   open "${app_path}"
 }
@@ -138,7 +314,7 @@ capture_sample() {
   fi
 
   run_capture "${scenario_dir}/ps-${label}.txt" ps -p "${pid}" -o pid,ppid,stat,%cpu,%mem,etime,command
-  /usr/bin/sample "${pid}" 10 -file "${scenario_dir}/samples/sample-${label}.txt" >"${scenario_dir}/samples/sample-${label}.stderr.txt" 2>&1
+  /usr/bin/sample "${pid}" 5 -file "${scenario_dir}/samples/sample-${label}.txt" >"${scenario_dir}/samples/sample-${label}.stderr.txt" 2>&1
 }
 
 start_sampler() {
@@ -150,7 +326,7 @@ start_sampler() {
     while [ ! -f "${stop_file}" ]; do
       capture_sample "${scenario_dir}" "$(printf '%03d' "${index}")"
       index=$((index + 1))
-      sleep 10
+      sleep 1
     done
   ) &
   sampler_pid="$!"
@@ -167,13 +343,15 @@ stop_sampler() {
 start_usb_monitor() {
   local scenario_dir="$1"
   local stop_file="$2"
-  local index=1
 
   (
+    : >"${scenario_dir}/usb-enumeration-timeline.txt"
     while [ ! -f "${stop_file}" ]; do
-      run_capture "${scenario_dir}/ioreg-usb-$(printf '%03d' "${index}").txt" ioreg -p IOUSB -l -w0
-      index=$((index + 1))
-      sleep 5
+      {
+        printf '\n=== %s epoch=%s ===\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$(date '+%s')"
+        ioreg -p IOUSB -l -w0 | awk '/"USB Product Name"|"USB Vendor Name"|"USB Serial Number"|"idVendor"|"idProduct"|"locationID"|"Device Speed"/'
+      } >>"${scenario_dir}/usb-enumeration-timeline.txt" 2>&1
+      sleep 1
     done
   ) &
   usb_monitor_pid="$!"
@@ -279,42 +457,295 @@ collect_common() {
   fi
 }
 
+evidence_has() {
+  local pattern="$1"
+  shift
+  local file
+
+  for file in "$@"; do
+    if [ -f "${file}" ] && LC_ALL=C grep -Eq "${pattern}" "${file}" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+evidence_tree_has() {
+  local pattern="$1"
+  local directory="$2"
+
+  [ -d "${directory}" ] && LC_ALL=C grep -ERq "${pattern}" "${directory}" 2>/dev/null
+}
+
+generate_usb_summary() {
+  local scenario_dir="$1"
+  local summary="${scenario_dir}/diagnosis-summary.txt"
+  local mac_log="${scenario_dir}/files/handshaker-logs/usb-diagnostic.log"
+  local android_log="${scenario_dir}/android/handshaker-usb-diagnostic.log"
+  local timeline="${scenario_dir}/usb-enumeration-timeline.txt"
+  local syslog="${scenario_dir}/system-log-usb.txt"
+  local sample_dir="${scenario_dir}/samples"
+  local aoa=0 mac_patch=0 mac_callsite_map=0 mac_handshake=0 mac_handshake_end=0
+  local mac_handshake_failed=0 speed_unrecognized=0 link_superspeed=0
+  local direct_out_wait=0 direct_in_wait=0
+  local android_ready=0 accessory_intent=0 permission_requested=0 permission_granted=0 permission_denied=0
+  local accessory_open=0 android_read_begin=0 android_read_end=0 android_write_end=0
+  local evidence_complete=1 conclusion
+
+  evidence_has '18[dD]1|2[dD]0[0-5]|idVendor[^0-9]*(6353)|idProduct[^0-9]*(1152[0-5])' "${timeline}" && aoa=1
+  evidence_has 'event=PATCH_INSTALL handshake=1 callsiteMap=1' "${mac_log}" && mac_patch=1
+  evidence_has 'event=HANDSHAKE_CALLSITE_MAP verified=1' "${mac_log}" && mac_callsite_map=1
+  evidence_has 'event=HANDSHAKE_BEGIN' "${mac_log}" && mac_handshake=1
+  evidence_has 'event=HANDSHAKE_END' "${mac_log}" && mac_handshake_end=1
+  # HANDSHAKE_END is emitted for BOTH success and failure; the result field decides.
+  evidence_has 'event=HANDSHAKE_END.*result=err:' "${mac_log}" && mac_handshake_failed=1
+  # Bundled libusb 1.0.20 has no SuperSpeedPlus speed enum, so a 10Gbps link reports "Unknow"/speed=0.
+  evidence_has 'Speed: Unknow|[^0-9]speed=0[^0-9]' "${mac_log}" && speed_unrecognized=1
+  evidence_has 'enumerated .*(2[dD]0[0-5]).* at (10|20) Gbps' "${syslog}" && link_superspeed=1
+  evidence_tree_has 'sendHandShakeRequestWithMSTimeout:\].*\+ (858|1018)([^0-9]|$)' "${sample_dir}" && direct_out_wait=1
+  evidence_tree_has 'sendHandShakeRequestWithMSTimeout:\].*\+ (1580|2510)([^0-9]|$)' "${sample_dir}" && direct_in_wait=1
+  evidence_has 'APP_START' "${android_log}" && android_ready=1
+  evidence_has 'ACCESSORY_PERMISSION|ACTIVITY_NEW_INTENT.*USB_ACCESSORY_ATTACHED|SERVICE_ON_START.*UsbAccessory' "${android_log}" && accessory_intent=1
+  evidence_has 'PERMISSION_REQUEST_SENT' "${android_log}" && permission_requested=1
+  evidence_has 'ACCESSORY_PERMISSION hasPermission=true|PERMISSION_RESULT granted=true' "${android_log}" && permission_granted=1
+  evidence_has 'PERMISSION_RESULT granted=false' "${android_log}" && permission_denied=1
+  evidence_has 'OPEN_ACCESSORY_OK fd=' "${android_log}" && accessory_open=1
+  evidence_has 'INPUT_FIRST_READ_BEGIN' "${android_log}" && android_read_begin=1
+  evidence_has 'INPUT_FIRST_READ_END bytes=[1-9][0-9]*' "${android_log}" && android_read_end=1
+  evidence_has 'OUTPUT_FIRST_WRITE_END bytes=[1-9][0-9]*' "${android_log}" && android_write_end=1
+
+  if [ "${mac_handshake}" = "1" ]; then
+    aoa=1
+  fi
+  if [ ! -f "${mac_log}" ] || [ ! -f "${android_log}" ] || [ "${mac_callsite_map}" = "0" ]; then
+    evidence_complete=0
+  fi
+
+  if [ -f "${scenario_dir}/android/preflight-error.txt" ]; then
+    conclusion="诊断前置检查未通过, 正式 USB 测试未开始. 请先解决摘要中的 ADB 或诊断 APK 问题."
+    evidence_complete=0
+  elif [ -f "${scenario_dir}/mac-preflight-error.txt" ]; then
+    conclusion="Mac 诊断前置检查未通过, 正式 USB 测试未开始. 请重新安装包内 DMG 后再运行脚本."
+    evidence_complete=0
+  elif [ "${aoa}" = "0" ]; then
+    conclusion="未进入 Android Open Accessory 模式. 故障位于线材, USB 端口, Mac 设备发现或 AOA 控制切换阶段."
+  elif [ "${mac_patch}" = "0" ]; then
+    conclusion="Mac 诊断补丁未加载, 本次证据不完整, 禁止据此判断 USB 根因."
+    evidence_complete=0
+  elif [ "${mac_handshake}" = "0" ]; then
+    conclusion="设备已进入 AOA, 但 Mac 未开始应用层握手. 故障位于 SFUSBDevice 发现, 接口占用或握手调度阶段."
+  elif [ "${android_ready}" = "0" ]; then
+    conclusion="缺少 Android 持久日志, 本次证据不完整, 禁止据此判断 Android 是否收到 Accessory Intent."
+    evidence_complete=0
+  elif [ "${accessory_intent}" = "0" ]; then
+    conclusion="Mac 已开始握手, 但 Android 未收到有效 Accessory Intent. 故障位于 Android Accessory Intent 分发或默认处理程序链路."
+  elif [ "${permission_denied}" = "1" ]; then
+    conclusion="Android 收到 Accessory Intent, 但 USB 配件权限被拒绝."
+  elif [ "${permission_granted}" = "0" ]; then
+    if [ "${permission_requested}" = "1" ]; then
+      conclusion="Android 已发出 USB 配件权限请求, 但未收到授权结果. 故障位于系统授权弹窗或权限回调链路."
+    else
+      conclusion="Android 收到 Accessory Intent, 但没有进入授权完成路径. 故障位于 Android USB 权限流程."
+    fi
+  elif [ "${accessory_open}" = "0" ]; then
+    conclusion="Android 已获得 USB 配件权限, 但 openAccessory 未成功返回文件描述符."
+  elif [ "${android_read_begin}" = "0" ]; then
+    conclusion="Android 已打开 Accessory, 但协议管线未进入首次 read. 故障位于 Android 协议线程启动阶段."
+  elif [ "${android_read_end}" = "0" ]; then
+    conclusion="Android 已等待首包但未收到数据. 故障位于 Mac 直接 libusb Bulk OUT 或主机到 Android 的 USB 数据交付链路, 不是相册索引或 Android 权限问题."
+  elif [ "${android_write_end}" = "0" ]; then
+    conclusion="Android 已收到 Mac 首包, 但未完成首次响应写入. 故障位于 Android SSP 响应生成或写线程."
+  elif [ "${mac_handshake_failed}" = "1" ]; then
+    if [ "${speed_unrecognized}" = "1" ] || [ "${link_superspeed}" = "1" ]; then
+      conclusion="Mac 握手返回错误, 且链路以 SuperSpeedPlus (10Gbps) 枚举, 内置 libusb 1.0.20 无法识别该速率 (Speed: Unknow). 应改用 USB 2.0 线材或 USB 2.0 转接/HUB 使链路降到 480Mbps 后重试. 实测该应用大文件吞吐低于 20MB/s, 远未用满 USB 2.0, 降速不损失传输性能."
+    elif [ "${direct_out_wait}" = "1" ]; then
+      conclusion="Mac 握手返回错误, 采样显示卡在直接 libusb Bulk OUT. 故障位于主机到设备的批量发送链路."
+    elif [ "${direct_in_wait}" = "1" ]; then
+      conclusion="Mac 握手返回错误, 采样显示卡在直接 libusb Bulk IN. 故障位于设备响应读取或解析链路."
+    else
+      conclusion="Mac 握手返回错误 (result=err), 但采样未命中具体 Bulk 调用点."
+    fi
+  elif [ "${mac_handshake_end}" = "0" ]; then
+    conclusion="Android 已写出首次响应, 但 Mac 握手未返回. 故障位于 Mac 直接 libusb Bulk IN 或响应解析链路."
+  else
+    conclusion="双端首个读写均成功且 Mac 握手正常返回. USB 基础传输正常. 故障位于后续 SSP 握手或上层连接状态."
+  fi
+
+  {
+    printf '结论: %s\n\n' "${conclusion}"
+    printf '证据完整性: %s\n' "$([ "${evidence_complete}" = "1" ] && printf '完整' || printf '不完整')"
+    printf '测试时间: %s\n\n' "$(tr '\n' ' ' <"${scenario_dir}/test-window.txt" 2>/dev/null || true)"
+    printf '关键路径:\n'
+    printf -- '- AOA 枚举: %s\n' "${aoa}"
+    printf -- '- Mac 诊断补丁: %s\n' "${mac_patch}"
+    printf -- '- Mac 直接 Bulk 调用点校验: %s\n' "${mac_callsite_map}"
+    printf -- '- Mac 握手开始: %s\n' "${mac_handshake}"
+    printf -- '- Mac 握手返回: %s\n' "${mac_handshake_end}"
+    printf -- '- Mac 握手返回错误: %s\n' "${mac_handshake_failed}"
+    printf -- '- 链路以 10Gbps 及以上枚举: %s\n' "${link_superspeed}"
+    printf -- '- libusb 无法识别链路速率: %s\n' "${speed_unrecognized}"
+    printf -- '- 采样命中直接 Bulk OUT/IN: %s/%s\n' "${direct_out_wait}" "${direct_in_wait}"
+    printf -- '- Android 诊断启动: %s\n' "${android_ready}"
+    printf -- '- Android Accessory Intent: %s\n' "${accessory_intent}"
+    printf -- '- Android 权限请求/授权/拒绝: %s/%s/%s\n' "${permission_requested}" "${permission_granted}" "${permission_denied}"
+    printf -- '- Android openAccessory: %s\n' "${accessory_open}"
+    printf -- '- Android 首次 read 开始/收到数据: %s/%s\n' "${android_read_begin}" "${android_read_end}"
+    printf -- '- Android 首次 write 完成: %s\n\n' "${android_write_end}"
+    printf '原始证据: files/handshaker-logs/usb-diagnostic.log, android/handshaker-usb-diagnostic.log, android/logcat-full.txt, samples/, usb-enumeration-timeline.txt, system-log-usb.txt.\n'
+  } >"${summary}"
+}
+
+run_usb_summary_self_test() {
+  local root
+  root="$(mktemp -d "${TMPDIR:-/tmp}/handshaker-diagnostics-test.XXXXXX")" || return 1
+  mkdir -p "${root}/files/handshaker-logs" "${root}/android" "${root}/samples"
+  printf '%s\n' \
+    'event=HANDSHAKE_CALLSITE_MAP verified=1' \
+    'event=PATCH_INSTALL handshake=1 callsiteMap=1' \
+    'session=test event=HANDSHAKE_BEGIN' \
+    >"${root}/files/handshaker-logs/usb-diagnostic.log"
+  printf '%s\n' \
+    'APP_START' \
+    'ACCESSORY_PERMISSION hasPermission=true' \
+    'OPEN_ACCESSORY_OK fd=42' \
+    'INPUT_FIRST_READ_BEGIN requested=16' \
+    >"${root}/android/handshaker-usb-diagnostic.log"
+  printf '%s\n' '-[SFUSBDevice sendHandShakeRequestWithMSTimeout:] (in SmartFinderCore) + 858' >"${root}/samples/sample-001.txt"
+  printf '%s\n' 'idVendor = 6353 idProduct = 11521' >"${root}/usb-enumeration-timeline.txt"
+  printf '%s\n' 'start=self-test' 'end=self-test' >"${root}/test-window.txt"
+
+  generate_usb_summary "${root}"
+  if ! grep -q 'libusb Bulk OUT' "${root}/diagnosis-summary.txt"; then
+    cat "${root}/diagnosis-summary.txt"
+    rm -rf "${root}"
+    return 1
+  fi
+  rm -rf "${root}"
+
+  # Regression case: every stage reports success but the handshake actually
+  # returned "err: Operation timed out" on a 10Gbps link. This previously
+  # produced the wrong "USB 基础传输正常" verdict.
+  root="$(mktemp -d "${TMPDIR:-/tmp}/handshaker-diagnostics-test.XXXXXX")" || return 1
+  mkdir -p "${root}/files/handshaker-logs" "${root}/android" "${root}/samples"
+  printf '%s\n' \
+    'event=HANDSHAKE_CALLSITE_MAP verified=1' \
+    'event=PATCH_INSTALL handshake=1 callsiteMap=1' \
+    'session=test event=HANDSHAKE_BEGIN Speed: Unknow speed=0' \
+    'session=test event=HANDSHAKE_END elapsedMs=15213 resultPresent=1 result=err: Operation timed out Speed: Unknow speed=0' \
+    >"${root}/files/handshaker-logs/usb-diagnostic.log"
+  printf '%s\n' \
+    'APP_START' \
+    'ACCESSORY_PERMISSION hasPermission=true' \
+    'OPEN_ACCESSORY_OK fd=144' \
+    'INPUT_FIRST_READ_BEGIN requested=16384' \
+    'INPUT_FIRST_READ_END bytes=217 elapsedMs=1' \
+    'OUTPUT_FIRST_WRITE_END bytes=189 elapsedMs=1' \
+    >"${root}/android/handshaker-usb-diagnostic.log"
+  printf '%s\n' '-[SFUSBDevice sendHandShakeRequestWithMSTimeout:] (in SmartFinderCore) + 858' >"${root}/samples/sample-001.txt"
+  printf '%s\n' 'idVendor = 6353 idProduct = 11521' >"${root}/usb-enumeration-timeline.txt"
+  printf '%s\n' 'enumerated 0x18d1/2d01/0515 (Xiaomi 13 Ultra / 1) at 10 Gbps' >"${root}/system-log-usb.txt"
+  printf '%s\n' 'start=self-test' 'end=self-test' >"${root}/test-window.txt"
+
+  generate_usb_summary "${root}"
+  if grep -q 'USB 基础传输正常' "${root}/diagnosis-summary.txt" || ! grep -q 'SuperSpeedPlus' "${root}/diagnosis-summary.txt"; then
+    cat "${root}/diagnosis-summary.txt"
+    rm -rf "${root}"
+    return 1
+  fi
+  rm -rf "${root}"
+  printf '%s\n' "USB diagnosis summary self-test passed"
+}
+
 collect_usb() {
   local scenario_dir="${out_dir}/usb"
   local stop_file="${scenario_dir}/.stop-sampling"
   local usb_stop_file="${scenario_dir}/.stop-usb-monitor"
+  local mac_usb_log_dir="${HOME}/Library/Application Support/HandShaker/logs"
+  local mac_usb_log="${mac_usb_log_dir}/usb-diagnostic.log"
+  local log_start log_end patch_ready=0
 
   mkdir -p "${scenario_dir}"
   rm -f "${stop_file}" "${usb_stop_file}"
 
   say_step "USB 诊断"
-  printf '%s\n' "重要: 测试时请同时看手机 HandShaker 页面底部 USB 状态流水."
-  printf '%s\n' "如果状态停住或连接成功, 请拍一张手机页面照片, 和 zip 一起发给维护者."
-  printf '%s\n' "1. 先拔掉手机 USB 线."
-  printf '%s\n' "2. 按回车后, 我会打开 HandShaker 并开始采样."
-  printf '%s\n' "3. 然后你插上手机, 按平时方式允许弹窗."
-  printf '%s\n' "4. 如果 Mac 转彩球, 不要强退, 等 30 秒后回到这个窗口按回车."
-  printf '%s\n' "5. 出现未连接或连接成功后, 回到这个窗口按回车结束 USB 采集."
-  press_enter "准备好后按回车开始 USB 诊断..."
+  printf '%s\n' "正式测试前会先验证 Android 诊断日志. 前置检查不通过时不会浪费一次复现."
+  printf '%s\n' "1. 先把手机连接到这台 Mac, 开启 USB 调试并允许这台 Mac."
+  printf '%s\n' "2. 脚本会自动安装同包内诊断版 Android HandShaker, 保留应用数据."
+  printf '%s\n' "3. 前置检查完成后再按提示拔线, 正式测试只需插线一次."
+  close_handshaker || return 0
+  press_enter "手机已连接并允许 USB 调试后按回车开始前置检查..."
 
-  printf '%s\n' "请拍摄手机 HandShaker USB 状态流水页面, 和本 zip 一起发送." >"${scenario_dir}/android-usb-status-photo-required.txt"
+  if ! prepare_android_usb_diagnostics "${scenario_dir}"; then
+    printf '%s\n' "status=not-started reason=android-preflight-failed" >"${scenario_dir}/test-window.txt"
+    generate_usb_summary "${scenario_dir}"
+    return 0
+  fi
+
+  printf '%s\n' "Android 诊断日志验证通过."
+  press_enter "现在拔下手机数据线, 拔下后按回车准备正式测试..."
+
+  mkdir -p "${mac_usb_log_dir}"
+  if [ -f "${mac_usb_log}" ]; then
+    cp -p "${mac_usb_log}" "${scenario_dir}/preexisting-mac-usb-diagnostic.log"
+  fi
+  rm -f "${mac_usb_log}" "${mac_usb_log}.previous"
+  if [ -e "${mac_usb_log}" ]; then
+    printf '%s\n' "无法清空 Mac 旧诊断日志, 正式测试不会开始." | tee "${scenario_dir}/mac-preflight-error.txt"
+    printf '%s\n' "status=not-started reason=mac-diagnostic-log-reset-failed" >"${scenario_dir}/test-window.txt"
+    generate_usb_summary "${scenario_dir}"
+    return 0
+  fi
   capture_usb_snapshot "${scenario_dir}" "before"
+  log_start="$(date -v-10S '+%Y-%m-%d %H:%M:%S')"
   start_log_monitor "${scenario_dir}" "usb"
   open_handshaker || {
     stop_log_monitor "${log_monitor_pid}"
+    printf '%s\n' "status=not-started reason=mac-app-start-failed" >"${scenario_dir}/test-window.txt"
+    generate_usb_summary "${scenario_dir}"
     return 0
   }
 
   if ! wait_for_handshaker; then
     printf '%s\n' "没有找到 HandShaker 进程." >"${scenario_dir}/error.txt"
     stop_log_monitor "${log_monitor_pid}"
+    printf '%s\n' "status=not-started reason=mac-process-not-found" >"${scenario_dir}/test-window.txt"
+    generate_usb_summary "${scenario_dir}"
+    return 0
+  fi
+
+  for _ in {1..40}; do
+    if [ -f "${mac_usb_log}" ] && \
+       grep -q 'event=HANDSHAKE_CALLSITE_MAP verified=1' "${mac_usb_log}" 2>/dev/null && \
+       grep -q 'event=PATCH_INSTALL handshake=1 callsiteMap=1' "${mac_usb_log}" 2>/dev/null; then
+      patch_ready=1
+      break
+    fi
+    sleep 0.25
+  done
+  if [ "${patch_ready}" != "1" ]; then
+    printf '%s\n' "Mac USB 诊断补丁未加载, 正式测试不会开始." | tee "${scenario_dir}/mac-preflight-error.txt"
+    stop_log_monitor "${log_monitor_pid}"
+    close_handshaker || true
+    collect_handshaker_files "${scenario_dir}"
+    printf '%s\n' "status=not-started reason=mac-diagnostic-patch-missing" >"${scenario_dir}/test-window.txt"
+    generate_usb_summary "${scenario_dir}"
     return 0
   fi
 
   capture_app_state "${scenario_dir}" "before-repro"
   start_sampler "${scenario_dir}" "${stop_file}"
   start_usb_monitor "${scenario_dir}" "${usb_stop_file}"
-  press_enter "现在请插上手机并复现 USB 问题. 复现后按回车结束 USB 采集..."
+  {
+    printf 'start_local=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'start_epoch=%s\n' "$(date '+%s')"
+  } >"${scenario_dir}/test-window.txt"
+  printf '%s\n' "现在只插线一次, 按平时方式允许手机上的 USB 配件弹窗."
+  printf '%s\n' "出现连接成功或失败后按回车. 如果一直没结果, 等 30 秒后按回车."
+  press_enter "插线并复现后按回车结束正式采集..."
+  {
+    printf 'end_local=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'end_epoch=%s\n' "$(date '+%s')"
+  } >>"${scenario_dir}/test-window.txt"
   screencapture -x "${scenario_dir}/mac-screen-after-repro.png" >/dev/null 2>&1 || true
   capture_app_state "${scenario_dir}" "after-repro"
   stop_sampler "${sampler_pid}" "${stop_file}"
@@ -323,11 +754,13 @@ collect_usb() {
 
   capture_sample "${scenario_dir}" "final"
   capture_usb_snapshot "${scenario_dir}" "after"
-  /usr/bin/log show --style syslog --last 30m --predicate 'process == "HandShaker" OR eventMessage CONTAINS[c] "HandShaker" OR eventMessage CONTAINS[c] "HandShakerMaintained" OR eventMessage CONTAINS[c] "SmartFinder" OR eventMessage CONTAINS[c] "USBHost" OR eventMessage CONTAINS[c] "libusb" OR eventMessage CONTAINS[c] "Accessory" OR eventMessage CONTAINS[c] "AOA" OR eventMessage CONTAINS[c] "Android" OR eventMessage CONTAINS[c] "Xiaomi" OR eventMessage CONTAINS[c] "Smartisan"' >"${scenario_dir}/system-log-usb.txt" 2>&1
+  log_end="$(date '+%Y-%m-%d %H:%M:%S')"
+  /usr/bin/log show --style syslog --start "${log_start}" --end "${log_end}" --predicate 'process == "HandShaker" OR eventMessage CONTAINS[c] "HandShaker" OR eventMessage CONTAINS[c] "HandShakerMaintained" OR eventMessage CONTAINS[c] "SmartFinder" OR eventMessage CONTAINS[c] "USBHost" OR eventMessage CONTAINS[c] "libusb" OR eventMessage CONTAINS[c] "Accessory" OR eventMessage CONTAINS[c] "AOA" OR eventMessage CONTAINS[c] "Android" OR eventMessage CONTAINS[c] "Xiaomi" OR eventMessage CONTAINS[c] "Smartisan"' >"${scenario_dir}/system-log-usb.txt" 2>&1
   diff -u "${scenario_dir}/ioreg-usb-before.txt" "${scenario_dir}/ioreg-usb-after.txt" >"${scenario_dir}/ioreg-usb-diff.txt" 2>&1 || true
   diff -u "${scenario_dir}/ioreg-usbhost-before.txt" "${scenario_dir}/ioreg-usbhost-after.txt" >"${scenario_dir}/ioreg-usbhost-diff.txt" 2>&1 || true
   collect_handshaker_files "${scenario_dir}"
-  ask_text "${scenario_dir}/android-usb-status-text.txt" "请把手机 HandShaker 页面底部最后显示的 USB 状态文字输入到这里:"
+  collect_android_usb_evidence "${scenario_dir}" || true
+  generate_usb_summary "${scenario_dir}"
   ask_choice "${scenario_dir}/user-result.txt" \
     "请选择这次 USB 测试结果:" \
     "1. 手机和 Mac 都没反应" \
@@ -385,6 +818,13 @@ collect_wifi() {
     "3. 连接成功, 没有转彩球" \
     "4. 连接成功后转彩球或卡死"
 }
+
+if [ "${1:-}" = "--self-test" ]; then
+  run_usb_summary_self_test
+  exit $?
+fi
+
+mkdir -p "${common_dir}"
 
 say_step "HandShaker 诊断工具"
 printf '%s\n' "这个窗口不要关闭. 诊断结束后, 桌面会生成一个 zip 文件."
