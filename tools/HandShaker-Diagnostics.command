@@ -160,15 +160,32 @@ prepare_android_usb_diagnostics() {
   done
 
   printf '%s\n' "${adb_serial}" >"${scenario_dir}/android/adb-serial.txt"
-  {
-    printf '$ %q -s %q install -r %q\n\n' "${adb_path}" "${adb_serial}" "${diagnostic_apk}"
-    "${adb_path}" -s "${adb_serial}" install -r "${diagnostic_apk}"
-  } >"${scenario_dir}/android/apk-install.txt" 2>&1
-  install_status=$?
-  if [ "${install_status}" -ne 0 ] || ! grep -q 'Success' "${scenario_dir}/android/apk-install.txt"; then
-    printf '%s\n' "诊断 APK 安装失败, 本次 USB 测试不会开始." | tee "${scenario_dir}/android/preflight-error.txt"
-    return 1
+
+  # Play Protect 首次安装拦截 (INSTALL_FAILED_VERIFICATION_FAILURE) 重试即过.
+  for attempt in 1 2 3; do
+    {
+      printf '$ %q -s %q install -r %q\n\n' "${adb_path}" "${adb_serial}" "${diagnostic_apk}"
+      "${adb_path}" -s "${adb_serial}" install -r "${diagnostic_apk}"
+    } >"${scenario_dir}/android/apk-install.txt" 2>&1
+    install_status=$?
+    if [ "${install_status}" -eq 0 ] && grep -q 'Success' "${scenario_dir}/android/apk-install.txt"; then
+      break
+    fi
+    if [ "${attempt}" = "3" ]; then
+      printf '%s\n' "诊断 APK 安装失败 (可能被手机 Play Protect 拦截, 可在手机上关闭应用扫描后重跑)." | tee "${scenario_dir}/android/preflight-error.txt"
+      return 1
+    fi
+    sleep 2
+  done
+
+  # 部分机型存在应用分身/多用户副本 (User 900 等), 会使 am start 弹出"选择打开方式"
+  # 导致脚本卡死. 先移除非当前用户的副本, 只保留机主 (User 0) 实例.
+  current_user=$("${adb_path}" -s "${adb_serial}" shell am get-current-user 2>/dev/null | tr -d '[:space:]')
+  : "${current_user:=0}"
+  if [ "${current_user}" != "900" ] && "${adb_path}" -s "${adb_serial}" shell pm list packages --user 900 2>/dev/null | grep -q "${android_package}"; then
+    adb_capture "${scenario_dir}/android/dual-app-uninstall.txt" shell pm uninstall --user 900 "${android_package}"
   fi
+  adb_capture "${scenario_dir}/android/package-enable.txt" shell pm enable "${android_package}"
 
   adb_capture "${scenario_dir}/android/app-force-stop.txt" shell am force-stop "${android_package}"
   adb_capture "${scenario_dir}/android/old-diagnostic-log-remove.txt" shell rm -f \
@@ -180,8 +197,13 @@ prepare_android_usb_diagnostics() {
     return 1
   fi
   adb_capture "${scenario_dir}/android/logcat-clear.txt" logcat -c
+  # 显式组件启动; 若机型解析到多实例弹"选择打开方式" (ResolverActivity) 则
+  # 退化为 monkey 包名启动, 保证非交互环境下应用一定能被拉起.
   adb_capture "${scenario_dir}/android/app-launch.txt" shell am start -W -n "${android_package}/.MainActivity"
-  sleep 2
+  if grep -q 'ResolverActivity' "${scenario_dir}/android/app-launch.txt" 2>/dev/null; then
+    adb_capture "${scenario_dir}/android/app-launch-monkey.txt" shell monkey -p "${android_package}" -c android.intent.category.LAUNCHER 1
+  fi
+  sleep 3
 
   init_log="$("${adb_path}" -s "${adb_serial}" shell cat "${android_external_dir}/handshaker-usb-diagnostic.log" 2>/dev/null || true)"
   printf '%s\n' "${init_log}" >"${scenario_dir}/android/diagnostic-init-check.txt"
