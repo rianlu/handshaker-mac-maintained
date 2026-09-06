@@ -124,6 +124,7 @@ mkdir -p "${bundle_dir}"
 cp "${mac_dmg}" "${bundle_dir}/${mac_dmg_name}"
 cp "${android_apk}" "${bundle_dir}/HandShaker-Android-USB-Diagnostic.apk"
 cp "${script_dir}/HandShaker-Diagnostics.command" "${bundle_dir}/HandShaker-USB-Diagnostics.command"
+cp "${script_dir}/usb_link.awk" "${bundle_dir}/usb_link.awk"
 cp "${script_dir}/USB联合诊断使用说明.txt" "${bundle_dir}/使用说明.txt"
 chmod 755 "${bundle_dir}/HandShaker-USB-Diagnostics.command"
 
