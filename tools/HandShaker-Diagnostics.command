@@ -3,7 +3,9 @@
 set -u
 
 timestamp="$(date '+%Y%m%d-%H%M%S')"
-script_dir="${0:A:h}"
+# POSIX 兼容的脚本目录解析: 双击(zsh绝对路径)、cd后 sh/bash/zsh 手动执行(相对/绝对路径) 均正确.
+# 不用 zsh 专有 ${0:A:h}: 在 sh/bash 下它展开为空导致 script_dir 为空, 包内文件全部找不到.
+script_dir="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 out_dir="${HOME}/Desktop/HandShaker-Diagnostics-${timestamp}"
 common_dir="${out_dir}/common"
 app_name="HandShaker"
@@ -678,6 +680,41 @@ run_usb_summary_self_test() {
   printf '%s\n' "USB diagnosis summary self-test passed"
 }
 
+
+# 断连观察窗: 回车结束后继续监测 usb-enumeration-timeline 是否仍在变化.
+# 任何新出现的设备增删都会延长观察; 连续 30 秒无变化或到达 max_seconds 结束.
+observe_disconnect_window() {
+  local scenario_dir="$1"
+  local usb_stop_file="$2"
+  local max_seconds="${3:-300}"
+  local timeline="${scenario_dir}/usb-enumeration-timeline.txt"
+  local last_size quiet_seconds=0
+
+  [ -f "${timeline}" ] || return 0
+
+  while [ "${max_seconds}" -gt 0 ]; do
+    sleep 5
+    [ -f "${usb_stop_file}" ] && break
+    local current_size
+    current_size="$(wc -c <"${timeline}" 2>/dev/null | tr -d ' ')"
+    if [ "${current_size}" != "${last_size:-}" ]; then
+      if [ -n "${last_size:-}" ]; then
+        printf '  %s\n' "$(date '+%H:%M:%S') USB 设备状态发生变化（可能是断连/重连），继续观察..."
+      fi
+      last_size="${current_size}"
+      quiet_seconds=0
+    else
+      quiet_seconds=$((quiet_seconds + 5))
+      if [ "${quiet_seconds}" -ge 30 ]; then
+        printf '%s\n' "  链路已稳定 30 秒，观察结束。"
+        return 0
+      fi
+    fi
+    max_seconds=$((max_seconds - 5))
+  done
+  printf '%s\n' "  观察窗口达到上限，结束。"
+}
+
 collect_usb() {
   local scenario_dir="${out_dir}/usb"
   local stop_file="${scenario_dir}/.stop-sampling"
@@ -764,11 +801,22 @@ collect_usb() {
   printf '%s\n' "现在把手机数据线插到 Mac 上（只插这一次，不要反复插拔）。"
   printf '%s\n' "插上后手机会弹出“允许 USB 配件”的弹窗，像平时那样点允许。"
   printf '%s\n' "然后等手机或 Mac 出现连接结果（连上或失败都算）——最多等 30 秒。"
-  press_enter "看到结果后（或等了 30 秒仍无反应），回到这里按回车结束采集..."
+  printf '%s\n' ""
+  printf '%s\n' "连接成功后请像平时一样继续使用 1-2 分钟（浏览/传输文件都可以）。"
+  printf '%s\n' "如果中途出现断连/掉线，请等它自动重连（或重新插一次线）后继续等待。"
+  press_enter "现象出现后（或正常使用满 2 分钟无异常），回到这里按回车结束采集..."
   {
     printf 'end_local=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'end_epoch=%s\n' "$(date '+%s')"
   } >>"${scenario_dir}/test-window.txt"
+
+  # 断连观察窗: 采集结束后自动继续监测一段, 覆盖"回车后 1-2 分钟才断连"的场景.
+  # 观察到 USB 设备增删变化则持续延长, 直到链路稳定 30 秒或达到上限.
+  if grep -q '0x18d1\|2D01' "${scenario_dir}/usb-enumeration-timeline.txt" 2>/dev/null; then
+    printf '%s\n' ""
+    printf '%s\n' "正在追加观察窗口（检测连接是否会在稍后自动断开）..."
+    observe_disconnect_window "${scenario_dir}" "${usb_stop_file}" 300
+  fi
   screencapture -x "${scenario_dir}/mac-screen-after-repro.png" >/dev/null 2>&1 || true
   capture_app_state "${scenario_dir}" "after-repro"
   stop_sampler "${sampler_pid}" "${stop_file}"

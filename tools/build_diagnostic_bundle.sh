@@ -87,7 +87,9 @@ fi
 find_platform_tools() {
   local previous_bundle candidate
 
-  for previous_bundle in "${downloads_dir}"/HandShaker-macOS26-USB-OneShot-r3-beta1[0-9]; do
+  for previous_bundle in "${downloads_dir}"/HandShaker-macOS26-USB-OneShot-*; do
+    # 排除目标输出目录自身: rm -rf 后重建瞬间会被本函数误探测到半删状态.
+    [ "${previous_bundle}" = "${bundle_dir}" ] && continue
     candidate="${previous_bundle}/platform-tools/adb"
     if [ -x "${candidate}" ]; then
       printf '%s\n' "${previous_bundle}/platform-tools"
