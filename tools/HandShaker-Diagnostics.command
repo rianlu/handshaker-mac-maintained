@@ -501,9 +501,54 @@ evidence_tree_has() {
   [ -d "${directory}" ] && LC_ALL=C grep -ERq "${pattern}" "${directory}" 2>/dev/null
 }
 
+
+# USB 链路预检面板: 插线状态下向用户展示当前链路拓扑与速率, 并标记可疑配置.
+print_usb_link_report() {
+  local scenario_dir="$1"
+  local report="${scenario_dir}/usb-link-report.txt"
+  local speed_hawaii vendor product
+  local raw
+  raw="$(ioreg -p IOUSB -l -w0 2>/dev/null)"
+  printf '%s\n' "$raw" >"${scenario_dir}/usb-tree-raw.txt"
+
+  # 手机(能开 AOA 的安卓)当前枚举的 VID 集合: 0x22d9 OnePlus / 0x2717 Xiaomi / 0x18d1 Google(AOA已切换) / 0x2a70 Samsung 常见
+  local phone_line hub_line speed_line
+  phone_line="$(printf '%s\n' "${raw}" | grep -E '"USB Product Name" = "(一加|OnePlus|Xiaomi|Redmi|Samsung|Google|moto|Pixel)' | head -1)"
+  [ -z "${phone_line}" ] && phone_line="$(printf '%s\n' "${raw}" | grep -E '0x18d1' -B4 | grep '"USB Product Name"' | head -1)"
+  hub_line="$(printf '%s\n' "${raw}" | grep -E '"USB Product Name" = ".*(Hub|HUB|Hub).*"' | head -2)"
+  speed_line="$(printf '%s\n' "${raw}" | grep -m1 '"UsbLinkSpeed" = ')"
+
+  local phone_name phone_speed
+  phone_name="$(printf '%s\n' "${phone_line}" | sed -E 's/.*"USB Product Name" = "([^"]*)".*/\1/')"
+  phone_speed="$(printf '%s\n' "${raw}" | grep -A30 "$(printf '%s\n' "${phone_line}" | head -c 40)" | grep -m1 '"UsbLinkSpeed"')"
+
+  {
+    printf 'USB 链路预检报告\n'
+    printf '时间: %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'macOS: %s\n' "$(sw_vers -productVersion 2>/dev/null || echo '?')"
+    printf '机型: %s / %s\n\n' "$(sysctl -n hw.model 2>/dev/null || echo '?')" "$(sysctl -n machdep.cpu.brand_string 2>/dev/null | head -c 30 || echo '')"
+    printf '检测到手机: %s\n' "${phone_name:-未识别(可能已进入AOA模式或未连接)}"
+    if [ -n "${speed_line}" ]; then
+      printf '链路协商速率: %s\n' "$(printf '%s\n' "${speed_line}" | grep -oE '[0-9]+' | head -1 | awk '{v=$1; if(v>=10000000000) print v" (10Gbps或以上)"; else if(v>=5000000000) print v" (5Gbps)"; else if(v>=480000000) print v" (480Mbps USB2.0)"; else print v}')"
+    fi
+    if [ -n "${hub_line}" ]; then
+      printf '经过的集线器/坞: %s\n' "$(printf '%s\n' "${hub_line}" | sed -E 's/.*"USB Product Name" = "([^"]*)".*/\1/' | paste -sd ' / ' -)"
+    fi
+  } | tee "${report}"
+
+  printf '%s\n' ""
+  if [ -n "${hub_line}" ]; then
+    printf '%s\n' "⚠️  注意: 你经过了扩展坞/集线器连接. 部分坞会定时断开静默设备, 若测试中出现周期性断连,"
+    printf '%s\n' "    建议之后再用直连(不经过坞)的方式重测一轮作对比."
+  fi
+  printf '%s\n' "以上信息已存入 ${report}"
+  printf '%s\n' ""
+}
+
 generate_usb_summary() {
   local scenario_dir="$1"
   local summary="${scenario_dir}/diagnosis-summary.txt"
+  local link_report="${scenario_dir}/usb-link-report.txt"
   local mac_log="${scenario_dir}/files/handshaker-logs/usb-diagnostic.log"
   local android_log="${scenario_dir}/android/handshaker-usb-diagnostic.log"
   local timeline="${scenario_dir}/usb-enumeration-timeline.txt"
@@ -598,6 +643,11 @@ generate_usb_summary() {
   {
     printf '结论: %s\n\n' "${conclusion}"
     printf '证据完整性: %s\n' "$([ "${evidence_complete}" = "1" ] && printf '完整' || printf '不完整')"
+    if [ -f "${link_report}" ]; then
+      printf '\n测试环境 (摘自 USB 链路预检):\n'
+      sed -n '3,12p' "${link_report}" 2>/dev/null || true
+      printf '\n'
+    fi
     printf '测试时间: %s\n\n' "$(tr '\n' ' ' <"${scenario_dir}/test-window.txt" 2>/dev/null || true)"
     printf '关键路径:\n'
     printf -- '- AOA 枚举: %s\n' "${aoa}"
@@ -741,6 +791,8 @@ collect_usb() {
   fi
 
   printf '%s\n' "Android 诊断日志验证通过."
+  printf '%s\n' ""
+  print_usb_link_report "${scenario_dir}"
   press_enter "现在拔下手机数据线, 拔下后按回车准备正式测试..."
 
   mkdir -p "${mac_usb_log_dir}"
