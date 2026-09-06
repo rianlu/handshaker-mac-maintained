@@ -503,47 +503,71 @@ evidence_tree_has() {
 
 
 # USB 链路预检面板: 插线状态下向用户展示当前链路拓扑与速率, 并标记可疑配置.
+# 速率优先取 UsbLinkSpeed(新机型), 无则用 USBSpeed 枚举(全机型兼容):
+# 0=未知 1=低速1.5M 2=全速12M 3=高速480M 4=超速5G 5=超速+10G及以上.
 print_usb_link_report() {
   local scenario_dir="$1"
   local report="${scenario_dir}/usb-link-report.txt"
-  local speed_hawaii vendor product
-  local raw
+  local raw raw2 phone_name phone_speed_label hub_names vendor_line
   raw="$(ioreg -p IOUSB -l -w0 2>/dev/null)"
-  printf '%s\n' "$raw" >"${scenario_dir}/usb-tree-raw.txt"
+  raw2="$(ioreg -r -c IOUSBHostDevice -l -w0 2>/dev/null)"
+  printf '%s\n' "${raw}" >"${scenario_dir}/usb-tree-raw.txt"
 
-  # 手机(能开 AOA 的安卓)当前枚举的 VID 集合: 0x22d9 OnePlus / 0x2717 Xiaomi / 0x18d1 Google(AOA已切换) / 0x2a70 Samsung 常见
-  local phone_line hub_line speed_line
-  phone_line="$(printf '%s\n' "${raw}" | grep -E '"USB Product Name" = "(一加|OnePlus|Xiaomi|Redmi|Samsung|Google|moto|Pixel)' | head -1)"
-  [ -z "${phone_line}" ] && phone_line="$(printf '%s\n' "${raw}" | grep -E '0x18d1' -B4 | grep '"USB Product Name"' | head -1)"
-  hub_line="$(printf '%s\n' "${raw}" | grep -E '"USB Product Name" = ".*(Hub|HUB|Hub).*"' | head -2)"
-  speed_line="$(printf '%s\n' "${raw}" | grep -m1 '"UsbLinkSpeed" = ')"
+  # 手机识别: 已知厂商产品名, 或 AOA VID 0x18d1/6353 出现即视为安卓配件
+  phone_name="$(printf '%s\n' "${raw}" | grep -E '"USB Product Name" = "(一加|OnePlus|Xiaomi|Redmi|Samsung|Google|moto|Pixel)' | head -1 | sed -E 's/.*"USB Product Name" = "([^"]*)".*/\1/')"
+  if [ -z "${phone_name}" ]; then
+    vendor_line="$(printf '%s\n' "${raw}" | grep -m1 '"idVendor" = 6353')"
+    [ -z "${vendor_line}" ] && vendor_line="$(printf '%s\n' "${raw2}" | grep -m1 '"idVendor" = 6353')"
+    if [ -n "${vendor_line}" ]; then
+      phone_name="$(printf '%s\n' "${raw}" | grep -m1 '"USB Product Name"' | sed -E 's/.*"USB Product Name" = "([^"]*)".*/\1/') (AOA 模式)"
+    fi
+  fi
 
-  local phone_name phone_speed
-  phone_name="$(printf '%s\n' "${phone_line}" | sed -E 's/.*"USB Product Name" = "([^"]*)".*/\1/')"
-  phone_speed="$(printf '%s\n' "${raw}" | grep -A30 "$(printf '%s\n' "${phone_line}" | head -c 40)" | grep -m1 '"UsbLinkSpeed"')"
+  # 链路速率: UsbLinkSpeed(优先, 数值型) 或 USBSpeed(枚举型)
+  local speed_raw speed_num
+  speed_raw="$(printf '%s\n' "${raw}" | grep -m1 '"UsbLinkSpeed" = ')"
+  if [ -z "${speed_raw}" ]; then
+    speed_raw="$(printf '%s\n' "${raw2}" | grep -m1 '"USBSpeed" = ')"
+  fi
+  speed_num="$(printf '%s\n' "${speed_raw}" | grep -oE '[0-9]+' | head -1)"
+  case "${speed_num}" in
+    5) phone_speed_label="SuperSpeedPlus (10Gbps 或以上) - 老程序可能无法识别!" ;;
+    4) phone_speed_label="SuperSpeed (5Gbps)" ;;
+    3) phone_speed_label="High-Speed (480Mbps, USB 2.0)" ;;
+    2) phone_speed_label="Full-Speed (12Mbps)" ;;
+    1) phone_speed_label="Low-Speed (1.5Mbps)" ;;
+    *) phone_speed_label="未知 (${speed_raw:-未取到})" ;;
+  esac
+
+  hub_names="$(printf '%s\n' "${raw}" | grep -E '"USB Product Name" = ".*(Hub|HUB).*"' | sed -E 's/.*"USB Product Name" = "([^"]*)".*/\1/' | paste -sd ' / ' -)"
 
   {
     printf 'USB 链路预检报告\n'
     printf '时间: %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-    printf 'macOS: %s\n' "$(sw_vers -productVersion 2>/dev/null || echo '?')"
-    printf '机型: %s / %s\n\n' "$(sysctl -n hw.model 2>/dev/null || echo '?')" "$(sysctl -n machdep.cpu.brand_string 2>/dev/null | head -c 30 || echo '')"
-    printf '检测到手机: %s\n' "${phone_name:-未识别(可能已进入AOA模式或未连接)}"
-    if [ -n "${speed_line}" ]; then
-      printf '链路协商速率: %s\n' "$(printf '%s\n' "${speed_line}" | grep -oE '[0-9]+' | head -1 | awk '{v=$1; if(v>=10000000000) print v" (10Gbps或以上)"; else if(v>=5000000000) print v" (5Gbps)"; else if(v>=480000000) print v" (480Mbps USB2.0)"; else print v}')"
-    fi
-    if [ -n "${hub_line}" ]; then
-      printf '经过的集线器/坞: %s\n' "$(printf '%s\n' "${hub_line}" | sed -E 's/.*"USB Product Name" = "([^"]*)".*/\1/' | paste -sd ' / ' -)"
+    printf 'macOS: %s (Build %s)\n' "$(sw_vers -productVersion 2>/dev/null || echo '?')" "$(sw_vers -buildVersion 2>/dev/null || echo '?')"
+    printf '机型: %s / %s\n\n' "$(sysctl -n hw.model 2>/dev/null || echo '?')" "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo '?')"
+    printf '检测到手机: %s\n' "${phone_name:-未识别 (未连接或非已知厂商)}"
+    printf '链路速率: %s\n' "${phone_speed_label}"
+    if [ -n "${hub_names}" ]; then
+      printf '经过的集线器/坞: %s\n' "${hub_names}"
+    else
+      printf '经过的集线器/坞: 无 (直连)\n'
     fi
   } | tee "${report}"
 
   printf '%s\n' ""
-  if [ -n "${hub_line}" ]; then
+  if [ -n "${hub_names}" ]; then
     printf '%s\n' "⚠️  注意: 你经过了扩展坞/集线器连接. 部分坞会定时断开静默设备, 若测试中出现周期性断连,"
     printf '%s\n' "    建议之后再用直连(不经过坞)的方式重测一轮作对比."
+  fi
+  if [ "${speed_num}" = "5" ]; then
+    printf '%s\n' "⚠️  注意: 当前链路为 10Gbps 超高速档, 这正是老版本 USB 库无法识别的速率档,"
+    printf '%s\n' "    是已知连接失败问题的触发条件之一 (详见测试结论)."
   fi
   printf '%s\n' "以上信息已存入 ${report}"
   printf '%s\n' ""
 }
+
 
 generate_usb_summary() {
   local scenario_dir="$1"
