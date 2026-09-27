@@ -84,11 +84,66 @@ static void HSShowMaintainedAbout(id self, SEL _cmd, id sender) {
     }
 }
 
-static NSString *HSPlainTextFromHTML(NSString *html) {
-    NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:0 error:nil];
-    NSString *stripped = [expression stringByReplacingMatchesInString:html options:0 range:NSMakeRange(0, html.length) withTemplate:@""];
-    return [[stripped stringByReplacingOccurrencesOfString:@"&lt;" withString:@"<"]
-            stringByReplacingOccurrencesOfString:@"&gt;" withString:@">"];
+static NSAttributedString *HSUpdateNotes(NSString *html) {
+    NSMutableString *text = [html mutableCopy] ?: [NSMutableString string];
+    NSDictionary<NSString *, NSString *> *breaks = @{
+        @"<li>" : @"\n• ",
+        @"</li>" : @"",
+        @"<p>" : @"",
+        @"</p>" : @"\n",
+        @"<ul>" : @"\n",
+        @"</ul>" : @"\n",
+        @"<br>" : @"\n",
+        @"<br/>" : @"\n",
+        @"<br />" : @"\n",
+    };
+    for (NSString *tag in breaks) {
+        [text replaceOccurrencesOfString:tag withString:breaks[tag] options:NSCaseInsensitiveSearch range:NSMakeRange(0, text.length)];
+    }
+    NSRegularExpression *tags = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:0 error:nil];
+    [tags replaceMatchesInString:text options:0 range:NSMakeRange(0, text.length) withTemplate:@""];
+    [text replaceOccurrencesOfString:@"&lt;" withString:@"<" options:0 range:NSMakeRange(0, text.length)];
+    [text replaceOccurrencesOfString:@"&gt;" withString:@">" options:0 range:NSMakeRange(0, text.length)];
+
+    NSFont *font = [NSFont systemFontOfSize:13];
+    NSMutableParagraphStyle *body = [NSMutableParagraphStyle new];
+    body.paragraphSpacing = 8;
+    NSMutableParagraphStyle *item = [NSMutableParagraphStyle new];
+    item.firstLineHeadIndent = 2;
+    item.headIndent = 16;
+    item.paragraphSpacing = 4;
+    NSMutableAttributedString *notes = [NSMutableAttributedString new];
+    for (NSString *rawLine in [text componentsSeparatedByString:@"\n"]) {
+        NSString *line = [rawLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (!line.length) {
+            continue;
+        }
+        BOOL bullet = [line hasPrefix:@"• "];
+        [notes appendAttributedString:[[NSAttributedString alloc] initWithString:[line stringByAppendingString:@"\n"]
+                                                                       attributes:@{
+                                                                           NSFontAttributeName : font,
+                                                                           NSParagraphStyleAttributeName : bullet ? item : body,
+                                                                       }]];
+    }
+    return notes;
+}
+
+static NSView *HSNotesView(NSAttributedString *notes) {
+    NSTextView *view = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 440, 10)];
+    view.editable = NO;
+    view.drawsBackground = NO;
+    view.textContainerInset = NSMakeSize(0, 2);
+    view.textContainer.widthTracksTextView = YES;
+    view.textContainer.containerSize = NSMakeSize(440, CGFLOAT_MAX);
+    [view.textStorage setAttributedString:notes];
+    [view.layoutManager ensureLayoutForTextContainer:view.textContainer];
+    CGFloat textHeight = [view.layoutManager usedRectForTextContainer:view.textContainer].size.height + 8;
+    view.frame = NSMakeRect(0, 0, 440, textHeight);
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 440, MIN(MAX(textHeight, 80), 260))];
+    scroll.hasVerticalScroller = textHeight > 260;
+    scroll.drawsBackground = NO;
+    scroll.documentView = view;
+    return scroll;
 }
 
 static void HSCloseDownloadWindow(void) {
@@ -226,7 +281,7 @@ static void HSCheckForMaintainedUpdate(BOOL interactive) {
                     fileURLString = attribute.stringValue;
                 }
             }
-            NSString *notes = HSPlainTextFromHTML([[item elementsForName:@"description"].firstObject stringValue] ?: @"");
+            NSAttributedString *notes = HSUpdateNotes([[item elementsForName:@"description"].firstObject stringValue] ?: @"");
             long long localBuild = HSBundleString(@"CFBundleVersion").longLongValue;
             BOOL newer = remoteBuild.longLongValue > localBuild && fileURLString.length;
             HSUpdateCheckInFlight = NO;
@@ -241,7 +296,10 @@ static void HSCheckForMaintainedUpdate(BOOL interactive) {
             }
             NSAlert *alert = [[NSAlert alloc] init];
             alert.messageText = [NSString stringWithFormat:@"发现新版本 %@", remoteVersion ?: remoteBuild];
-            alert.informativeText = notes.length ? notes : @"可以下载安装包。";
+            alert.informativeText = @" ";
+            if (notes.length) {
+                alert.accessoryView = HSNotesView(notes);
+            }
             [alert addButtonWithTitle:@"下载并打开"];
             [alert addButtonWithTitle:@"稍后"];
             if ([alert runModal] == NSAlertFirstButtonReturn) {

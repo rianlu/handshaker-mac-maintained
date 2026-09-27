@@ -18,6 +18,8 @@
           <li>支持 mov 和 m4v 视频。</li>
           <li>修复拔掉手机时可能发生的崩溃。</li>
           <li>手机端下载入口改为维护版发布页。</li>
+          <li>「检查更新...」可以查看并下载新版本。大约每天自动检查一次，只有发现新版本时才会提示。下载时会显示进度，完成后打开安装包，将 HandShaker 拖入“应用程序”并替换。</li>
+          <li>关于窗口会显示非官方维护版、版本号和版权信息，并可打开项目主页和许可说明。</li>
         </ul>
         <p>已知问题：部分手机通过 USB 连接时，仍可能无法连上，或连上后断开、电脑端不显示设备。</p>
       ]]></description>
@@ -25,7 +27,7 @@
         url="https://github.com/rianlu/handshaker-mac-maintained/releases/download/v2.5.6-r3/handshaker-mac-maintained-2.5.6-r3-x86_64.dmg"
         sparkle:version="427"
         sparkle:shortVersionString="2.5.6-r3"
-        length="20786014"
+        length="20788439"
         type="application/octet-stream"/>
     </item>
   </channel>
