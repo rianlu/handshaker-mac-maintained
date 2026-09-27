@@ -1,9 +1,9 @@
 #!/bin/bash
 
-set -u
+set -eu
 
 APP_TEMPLATE_DIR="App_Template"
-BUILD_DIR="build"
+BUILD_DIR="${HANDSHAKER_MAC_BUILD_DIR:-build}"
 DMG_ASSETS_DIR="assets/dmg"
 RELEASE_CONFIG_FILE="./release.conf"
 SMARTFINDER_CORE_PATCH_SCRIPT="./patches/build_smartfinder_core_wrapper.sh"

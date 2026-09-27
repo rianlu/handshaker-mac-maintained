@@ -1,170 +1,105 @@
-#!/bin/sh
-# 组装 HandShaker macOS26 USB 联合诊断一shot 测试包.
-#
-# 用法:
-#   tools/build_diagnostic_bundle.sh [输出目录] [Android诊断APK路径] [Mac DMG路径]
-#
-# 默认参数:
-#   输出目录: ~/Downloads/HandShaker-macOS26-USB-OneShot-<版本后缀>
-#   Android APK: 取自 handshaker-android-maintained 仓库 release.env 指向的签名 APK
-#   Mac DMG: 本仓库 build/ 下最新构建
-#
-# 测试包结构 (与 2026-07 beta11 首发的 OneShot 包保持一致, 用户操作习惯不变):
-#   .
-#   ├── handshaker-mac-maintained-<版本>-x86_64.dmg   # Mac 端诊断版
-#   ├── HandShaker-Android-USB-Diagnostic.apk         # Android 端诊断版 (脚本自动安装)
-#   ├── HandShaker-USB-Diagnostics.command            # 联合诊断编排脚本
-#   ├── platform-tools/                               # adb (供脚本查找设备/装APK/拉日志)
-#   │   ├── adb
-#   │   ├── NOTICE.txt
-#   │   └── source.properties
-#   ├── 使用说明.txt                                   # 用户操作指引
-#   └── SHA256SUMS.txt                                # 包内文件校验和
-#
-# platform-tools 来源 (按顺序探测):
-#   1. 上一个 OneShot 包内的 platform-tools (复用已验证版本)
-#   2. ~/Library/Android/sdk/platform-tools
-#   3. 提示手动下载: https://developer.android.com/tools/releases/platform-tools
-#
-# 交付: 输出目录 + 同名 .zip (ditto 打包, 保留 AppleDouble 元数据).
+#!/bin/bash
+# Assemble one matched Mac/Android diagnostic bundle. Refuse existing outputs.
+# Usage: tools/build_diagnostic_bundle.sh [output-directory] [Android-APK] [Mac-DMG]
+set -euo pipefail
+script_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
+repo_root=$(cd -- "$script_dir/.." && pwd -P)
+android_repo="${HANDSHAKER_ANDROID_REPO:-$HOME/AIProjects/handshaker-android-maintained}"
+android_build="${HANDSHAKER_ANDROID_BUILD_DIR:-$android_repo/build/release}"
+mac_build="${HANDSHAKER_MAC_BUILD_DIR:-$repo_root/build}"
+case "$mac_build" in /*) ;; *) mac_build="$repo_root/$mac_build" ;; esac
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+get_value() { awk -v key="$1" 'index($0,key "=")==1 {print substr($0,length(key)+2); exit}' "$2"; }
 
-set -eu
+# Resolve the configured release, never an unrelated DMG selected by modification time.
+# shellcheck disable=SC1091
+. "$repo_root/release.conf"
+[[ "${DIAGNOSTIC_BUNDLE_ID:-}" =~ ^[0-9]{8}-[0-9]{2}$ ]] || fail "请在 release.conf 设置测试包编号, 格式为 YYYYMMDD-NN."
+mac_version="$RELEASE_BASE_VERSION${RELEASE_SUFFIX:+-$RELEASE_SUFFIX}"
+mac_arch=$(lipo -archs "$repo_root/App_Template/Contents/MacOS/HandShaker")
+[ "$mac_arch" = x86_64 ] || fail "此诊断模块只支持已校验的 x86_64 Core."
+mac_dmg="${3:-$mac_build/handshaker-mac-maintained-$mac_version-$mac_arch.dmg}"
+[ -f "$mac_dmg" ] || fail "未找到当前版本 DMG. 请先构建或通过第三个参数指定."
+android_apk="${2:-}"
+if [ -z "$android_apk" ] && [ -f "$android_build/handshaker-android-release.env" ]; then
+  android_apk=$(get_value HANDSHAKER_ANDROID_APK "$android_build/handshaker-android-release.env")
+fi
+[ -n "$android_apk" ] && [ -f "$android_apk" ] || fail "未找到 Android APK. 请先构建或通过第二个参数指定."
 
-script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd)
-downloads_dir="${HOME}/Downloads"
+bundle_dir="${1:-$HOME/Downloads/HandShaker-USB-Test-$DIAGNOSTIC_BUNDLE_ID}"
+bundle_dir="${bundle_dir%/}"
+[ -n "$bundle_dir" ] || fail "输出目录不能为空."
+case "$bundle_dir" in /*) ;; *) bundle_dir="$PWD/$bundle_dir" ;; esac
+bundle_zip="$bundle_dir.zip"
+[ ! -e "$bundle_dir" ] && [ ! -e "$bundle_zip" ] || fail "输出目录或同名 ZIP 已存在. 请指定新目录, 现有文件不会被覆盖."
 
-android_repo="${HOME}/AIProjects/handshaker-android-maintained"
-android_release_env="${android_repo}/build/release/handshaker-android-release.env"
+sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Library/Android/sdk}}"
+platform_tools="${HANDSHAKER_PLATFORM_TOOLS:-$sdk/platform-tools}"
+[ -x "$platform_tools/adb" ] || fail "未找到 platform-tools/adb."
+aapt="${HANDSHAKER_AAPT:-$sdk/build-tools/36.0.0/aapt2}"
+apksigner="${HANDSHAKER_APKSIGNER:-$sdk/build-tools/36.0.0/apksigner}"
+[ -x "$aapt" ] && [ -x "$apksigner" ] || fail "需要 Android build-tools 36.0.0, 或设置 HANDSHAKER_AAPT/HANDSHAKER_APKSIGNER."
+signing_info=$("$apksigner" verify --print-certs "$android_apk") || fail "Android APK 签名校验失败."
+android_signer_sha256=$(printf '%s\n' "$signing_info" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+[ -n "$android_signer_sha256" ] || fail "未取得 Android APK 的签名证书摘要."
+diagnostic_script_revision=$(sed -n 's/^script_revision="\(.*\)"$/\1/p' "$script_dir/HandShaker-Diagnostics.command")
+[ -n "$diagnostic_script_revision" ] || fail "未取得诊断脚本修订号."
+badging=$("$aapt" dump badging "$android_apk")
+android_name=$(printf '%s\n' "$badging" | sed -n "s/^package:.* versionName='\([^']*\)'.*/\1/p")
+android_code=$(printf '%s\n' "$badging" | sed -n "s/^package:.* versionCode='\([^']*\)'.*/\1/p")
+grep -q "^package: name='com.smartisanos.smartfolder.aoa' " <<<"$badging" || fail "Android APK 包名不匹配."
+expected_code=$(get_value RELEASE_VERSION_CODE "$android_repo/tools/release.conf")
+[ -n "$android_code" ] && [ "$android_code" = "$expected_code" ] || fail "Android APK 不是当前配置的诊断版本."
 
-fail() {
-  printf '%s\n' "FAIL: $1" >&2
-  exit 1
+# Inspect the actual DMG payload and its signature before writing the bundle.
+mount_root=$(mktemp -d "${TMPDIR:-/tmp}/handshaker-bundle-check.XXXXXX")
+mount_dir="$mount_root/mount"
+mkdir "$mount_dir"
+mounted=0
+cleanup() {
+  if [ "$mounted" = 1 ]; then hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; fi
+  rmdir "$mount_dir" "$mount_root" 2>/dev/null || true
 }
+trap cleanup EXIT
+hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mount_dir" "$mac_dmg" >/dev/null
+mounted=1
+app="$mount_dir/HandShaker.app"
+actual_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")
+actual_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
+[ "$actual_build" = "$RELEASE_BUILD_NUMBER" ] && [ "$actual_version" = "$mac_version" ] || fail "DMG 内实际应用版本与当前配置不一致."
+codesign --verify --deep --strict "$app" || fail "DMG 内应用签名校验失败."
+hdiutil detach "$mount_dir" >/dev/null
+mounted=0
 
-# ---- 参数 ----
-
-bundle_dir_arg="${1:-}"
-android_apk_arg="${2:-}"
-mac_dmg_arg="${3:-}"
-
-# ---- Mac DMG ----
-
-if [ -n "${mac_dmg_arg}" ]; then
-  mac_dmg="${mac_dmg_arg}"
-else
-  mac_dmg="$(ls -t "${repo_root}"/build/handshaker-mac-maintained-*.dmg 2>/dev/null | head -n 1 || true)"
-fi
-[ -n "${mac_dmg}" ] && [ -f "${mac_dmg}" ] || fail "未找到 Mac DMG. 先运行 ./build.sh 或通过参数3指定."
-mac_dmg_name="$(basename "${mac_dmg}")"
-
-# 从 DMG 文件名提取版本 (handshaker-mac-maintained-2.5.6-r3-beta13-usbdiag-x86_64.dmg -> r3-beta13-usbdiag)
-bundle_suffix="$(printf '%s\n' "${mac_dmg_name}" | sed -E 's/^handshaker-mac-maintained-[0-9.]+-([^-]+.*u|x86_64)?-x86_64\.dmg$/\1/')"
-case "${mac_dmg_name}" in
-  handshaker-mac-maintained-*x86_64.dmg)
-    bundle_suffix="$(printf '%s\n' "${mac_dmg_name}" | sed -E 's/^handshaker-mac-maintained-[0-9.]+-(.*)-x86_64\.dmg$/\1/')"
-    ;;
-  *)
-    bundle_suffix="$(printf '%s\n' "${mac_dmg_name}" | sed -E 's/^handshaker-mac-maintained-(.*)\.dmg$/\1/')"
-    ;;
-esac
-
-bundle_dir="${bundle_dir_arg:-${downloads_dir}/HandShaker-macOS26-USB-OneShot-${bundle_suffix}}"
-
-# ---- Android 诊断 APK ----
-
-if [ -n "${android_apk_arg}" ]; then
-  android_apk="${android_apk_arg}"
-elif [ -f "${android_release_env}" ]; then
-  android_apk="$(sed -n 's/^HANDSHAKER_ANDROID_APK=//p' "${android_release_env}")"
-else
-  android_apk=""
-fi
-[ -n "${android_apk}" ] && [ -f "${android_apk}" ] || fail "未找到 Android 诊断 APK. 构建 handshaker-android-maintained 或通过参数2指定."
-
-# ---- platform-tools ----
-
-find_platform_tools() {
-  local previous_bundle candidate
-
-  for previous_bundle in "${downloads_dir}"/HandShaker-macOS26-USB-OneShot-*; do
-    # 排除目标输出目录自身: rm -rf 后重建瞬间会被本函数误探测到半删状态.
-    [ "${previous_bundle}" = "${bundle_dir}" ] && continue
-    candidate="${previous_bundle}/platform-tools/adb"
-    if [ -x "${candidate}" ]; then
-      printf '%s\n' "${previous_bundle}/platform-tools"
-      return 0
-    fi
-  done
-
-  candidate="${HOME}/Library/Android/sdk/platform-tools/adb"
-  if [ -x "${candidate}" ]; then
-    printf '%s\n' "${HOME}/Library/Android/sdk/platform-tools"
-    return 0
-  fi
-
-  return 1
-}
-
-platform_tools_src=""
-if ! platform_tools_src="$(find_platform_tools)"; then
-  fail "未找到 platform-tools. 参考: https://developer.android.com/tools/releases/platform-tools"
-fi
-
-# ---- 组装 ----
-
-printf '%s\n' "==> Mac DMG: ${mac_dmg}"
-printf '%s\n' "==> Android APK: ${android_apk}"
-printf '%s\n' "==> platform-tools: ${platform_tools_src}"
-printf '%s\n' "==> 输出目录: ${bundle_dir}"
-
-rm -rf "${bundle_dir}"
-mkdir -p "${bundle_dir}"
-
-cp "${mac_dmg}" "${bundle_dir}/${mac_dmg_name}"
-cp "${android_apk}" "${bundle_dir}/HandShaker-Android-USB-Diagnostic.apk"
-cp "${script_dir}/HandShaker-Diagnostics.command" "${bundle_dir}/HandShaker-USB-Diagnostics.command"
-cp "${script_dir}/usb_link.awk" "${bundle_dir}/usb_link.awk"
-cp "${script_dir}/USB联合诊断使用说明.txt" "${bundle_dir}/使用说明.txt"
-chmod 755 "${bundle_dir}/HandShaker-USB-Diagnostics.command"
-
-mkdir -p "${bundle_dir}/platform-tools"
-cp "${platform_tools_src}/adb" "${bundle_dir}/platform-tools/adb"
-if [ -f "${platform_tools_src}/NOTICE.txt" ]; then
-  cp "${platform_tools_src}/NOTICE.txt" "${bundle_dir}/platform-tools/NOTICE.txt"
-fi
-if [ -f "${platform_tools_src}/source.properties" ]; then
-  cp "${platform_tools_src}/source.properties" "${bundle_dir}/platform-tools/source.properties"
-fi
-chmod 755 "${bundle_dir}/platform-tools/adb"
-
-# ---- 校验和 ----
-
+mkdir -p "$(dirname "$bundle_dir")"
+mkdir "$bundle_dir"
+mac_name="1-安装Mac端.dmg"
+cp -X "$mac_dmg" "$bundle_dir/$mac_name"
+cp -X "$android_apk" "$bundle_dir/HandShaker-Android-USB-Diagnostic.apk"
+cp -X "$script_dir/HandShaker-Diagnostics.command" "$bundle_dir/2-开始测试.command"
+cp -X "$script_dir/usb_link.awk" "$bundle_dir/usb_link.awk"
+cp -X "$script_dir/USB联合诊断使用说明.txt" "$bundle_dir/使用说明.txt"
+mkdir "$bundle_dir/platform-tools"
+cp -X "$platform_tools/adb" "$bundle_dir/platform-tools/adb"
+for attachment in NOTICE NOTICE.txt source.properties; do
+  [ ! -f "$platform_tools/$attachment" ] || cp -X "$platform_tools/$attachment" "$bundle_dir/platform-tools/$attachment"
+done
+if [ -d "$platform_tools/lib64" ]; then cp -RX "$platform_tools/lib64" "$bundle_dir/platform-tools/"; fi
+chmod 755 "$bundle_dir/2-开始测试.command" "$bundle_dir/platform-tools/adb"
+{
+  printf 'SCHEMA=4\nBUNDLE_ID=%s\nSCRIPT_REVISION=%s\nMAC_VERSION=%s\nMAC_BUILD=%s\nMAC_DMG=%s\n' "$DIAGNOSTIC_BUNDLE_ID" "$diagnostic_script_revision" "$actual_version" "$actual_build" "$mac_name"
+  printf 'ANDROID_VERSION_NAME=%s\nANDROID_VERSION_CODE=%s\nOBSERVE_MODE=user-controlled\nTEST_FILE_BYTES=268435456\n' "$android_name" "$android_code"
+  printf 'ANDROID_SIGNER_CERT_SHA256=%s\n' "$android_signer_sha256"
+  printf 'CREATED_UTC=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+} >"$bundle_dir/diagnostic-manifest.txt"
 (
-  cd "${bundle_dir}"
-  shasum -a 256 \
-    "${mac_dmg_name}" \
-    "HandShaker-Android-USB-Diagnostic.apk" \
-    "HandShaker-USB-Diagnostics.command" \
-    "使用说明.txt" \
-    "platform-tools/adb" \
-    "platform-tools/NOTICE.txt" \
-    "platform-tools/source.properties" \
-    >SHA256SUMS.txt
+  cd "$bundle_dir"
+  # The checksum file is explicitly excluded from the input list.
+  # shellcheck disable=SC2094
+  while IFS= read -r -d '' item; do shasum -a 256 "$item"; done \
+    < <(find . -type f ! -name SHA256SUMS.txt -print0) >SHA256SUMS.txt
+  shasum -a 256 -c SHA256SUMS.txt
 )
-
-# ---- 打 zip ----
-
-bundle_zip="${bundle_dir}.zip"
-rm -f "${bundle_zip}"
-(
-  cd "${downloads_dir}"
-  ditto -c -k --keepParent "${bundle_dir}" "$(basename "${bundle_zip}")"
-)
-
-printf '%s\n' ""
-printf '%s\n' "✅ 测试包已生成:"
-printf '%s\n' "    目录: ${bundle_dir}"
-printf '%s\n' "    压缩: ${bundle_zip}"
-printf '%s\n' ""
-printf '%s\n' "下一步: 将 ${bundle_zip} 发给测试用户, 用户按包内 使用说明.txt 操作."
+COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc --noextattr --noqtn "$bundle_dir" "$bundle_zip"
+unzip -tq "$bundle_zip"
+printf '\n联合诊断包已生成:\n%s\n' "$bundle_zip"

@@ -66,6 +66,8 @@
 版本号统一在 `release.conf` 中维护. DMG 输出到 `build/`.
 Mac 包内保留原版 `SmartFolder.apk` 作为旧 ADB 转发兼容组件. Android 主程序由用户从维护版 Releases 页面独立安装.
 
+USB 联合诊断仍单独打 ZIP, 不放进面向所有用户的 DMG. 用 `tools/build_diagnostic_bundle.sh` 组装, 操作说明见 [USB联合诊断使用说明](tools/USB联合诊断使用说明.txt). `patches/USBTransportDiagnostics.m` 只在 `HS_USB_DIAGNOSTICS=1` 时记录传输元数据, 不记录载荷.
+
 ## 仓库结构
 
 ```text

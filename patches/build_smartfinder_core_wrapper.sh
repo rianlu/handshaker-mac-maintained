@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 
 core_dir="$repo_root/App_Template/Contents/Frameworks/SmartFinderCore.framework/Versions/A"
 main_bin="$repo_root/App_Template/Contents/MacOS/HandShaker"
@@ -47,6 +47,7 @@ clang \
   -mmacosx-version-min=10.11 \
   -fobjc-arc \
   "$patch_src" \
+  "$script_dir/USBTransportDiagnostics.m" \
   -o "$tmp_bin" \
   -install_name "$patch_install_name" \
   -current_version 1.0 \

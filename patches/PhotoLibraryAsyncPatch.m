@@ -114,7 +114,6 @@ static BOOL HSSwizzledVideoAllowedFileTypes = NO;
 static BOOL HSSwizzledSupportedVideoExt = NO;
 static BOOL HSSwizzledQRCodeImage = NO;
 static BOOL HSRegisteredLegacyPromptDefaults = NO;
-static BOOL HSWarnedSuperSpeedLink = NO;
 static BOOL HSLoggedInstall = NO;
 static BOOL HSDiagnosticsLogged = NO;
 
@@ -123,7 +122,8 @@ static const unsigned long long HSPhotoCacheDefaultTargetBytes = 1536ULL * 1024U
 static const unsigned long long HSPhotoCacheLowDiskMaxBytes = 512ULL * 1024ULL * 1024ULL;
 static const unsigned long long HSPhotoCacheLowDiskTargetBytes = 384ULL * 1024ULL * 1024ULL;
 static const unsigned long long HSPhotoCacheLowDiskFreeBytes = 10ULL * 1024ULL * 1024ULL * 1024ULL;
-static const unsigned long long HSUSBDiagnosticMaxBytes = 1024ULL * 1024ULL;
+static const unsigned long long HSUSBDiagnosticMaxBytes = 8ULL * 1024ULL * 1024ULL;
+extern void HSInstallUSBTransportDiagnostics(void);
 static const int HSUSBHandshakeTimeoutMilliseconds = 15000;
 static NSString *const HSLegacyAndroidDownloadURL = @"http://t.tt/apps/handshaker?qr=1";
 static NSString *const HSAndroidReleaseURL = @"https://github.com/rianlu/handshaker-android-maintained/releases/latest";
@@ -233,9 +233,9 @@ static void HSLogPhotoSyncPrompt(NSString *format, ...) {
     }
 }
 
-static void HSLogUSBDiagnostic(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+void HSLogUSBDiagnostic(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 
-static void HSLogUSBDiagnostic(NSString *format, ...) {
+void HSLogUSBDiagnostic(NSString *format, ...) {
     va_list arguments;
     va_start(arguments, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
@@ -249,8 +249,9 @@ static void HSLogUSBDiagnostic(NSString *format, ...) {
     }
     uint64_t threadId = 0;
     pthread_threadid_np(NULL, &threadId);
-    NSString *line = [NSString stringWithFormat:@"%@ uptime=%.3f pid=%d tid=%llu thread=%@ %@\n",
-                      [NSDate date],
+    NSString *line = [NSString stringWithFormat:@"%@ wallMs=%.0f run=%@ uptime=%.3f pid=%d tid=%llu thread=%@ %@\n",
+                      [NSDate date], NSDate.date.timeIntervalSince1970 * 1000.0,
+                      NSProcessInfo.processInfo.environment[@"HS_USB_DIAGNOSTIC_RUN_ID"] ?: @"standalone",
                       [NSProcessInfo processInfo].systemUptime,
                       [NSProcessInfo processInfo].processIdentifier,
                       (unsigned long long)threadId,
@@ -260,6 +261,8 @@ static void HSLogUSBDiagnostic(NSString *format, ...) {
 
     NSString *logDirectory = [HSHandShakerApplicationSupportPath() stringByAppendingPathComponent:@"logs"];
     NSString *logPath = [logDirectory stringByAppendingPathComponent:@"usb-diagnostic.log"];
+    NSString *override = NSProcessInfo.processInfo.environment[@"HS_USB_LOG_PATH"];
+    if ([override isAbsolutePath]) { logPath = override; logDirectory = override.stringByDeletingLastPathComponent; }
     if (!logPath.length) {
         return;
     }
@@ -1196,46 +1199,11 @@ static BOOL HSVerifyUSBHandshakeBulkCallsites(Class deviceClass) {
 }
 
 static void HSWarnSuperSpeedLinkIfNeeded(id device, id handshakeResult) {
-    // Only warn when the handshake actually failed AND libusb could not name the
-    // link speed. The bundled libusb 1.0.20 has no SuperSpeedPlus enum, so a
-    // 10Gbps link reports speed 0 and its bulk OUT never completes.
-    if (HSWarnedSuperSpeedLink) {
-        return;
+    NSString *result = [handshakeResult isKindOfClass:NSString.class] ? handshakeResult : nil;
+    id speed = HSValueForKey(device, @"speed");
+    if ((!result || [result hasPrefix:@"err:"]) && [speed respondsToSelector:@selector(integerValue)] && [speed integerValue] == 0) {
+        HSLogUSBDiagnostic(@"event=UNRECOGNIZED_LINK_SPEED speed=%@ handshakeFailed=1 causality=unconfirmed", speed);
     }
-
-    NSString *resultText = [handshakeResult isKindOfClass:[NSString class]] ? (NSString *)handshakeResult : nil;
-    BOOL handshakeFailed = (resultText == nil) || [resultText hasPrefix:@"err:"];
-    if (!handshakeFailed) {
-        return;
-    }
-
-    id speedValue = HSValueForKey(device, @"speed");
-    BOOL speedUnrecognized = ![speedValue respondsToSelector:@selector(integerValue)] ||
-                             [speedValue integerValue] == 0;
-    if (!speedUnrecognized) {
-        return;
-    }
-
-    HSWarnedSuperSpeedLink = YES;
-    HSLogUSBDiagnostic(@"event=SUPERSPEED_LINK_WARNING speed=%@ reason=handshake-failed-and-speed-unrecognized",
-                       speedValue ?: @"<nil>");
-
-    // Never block the USB thread, and never run a modal during launch: the
-    // original beachball was caused by a modal alert draining the main queue.
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            NSAlert *alert = [[NSAlert alloc] init];
-            alert.alertStyle = NSAlertStyleWarning;
-            alert.messageText = @"USB 连接失败：请改用 USB 3.0 (5Gbps) 数据线";
-            alert.informativeText = @"检测到手机以 USB 3.1 Gen2 / USB 3.2 (10Gbps) 超高速链路连接，新版 macOS 不再为旧程序自动降速，而本程序内置的 USB 库（2015 年版）无法识别 10Gbps 速率，因此无法建立连接。\n\n"
-                                     "解决办法：换用 USB 3.0 (5Gbps) 级别的数据线或 C-to-A 转接，使链路降到 5Gbps 即可正常连接。\n\n"
-                                     "注意：5Gbps 链路不影响传输速度（可达 70MB/s 以上）；请避免使用 USB 2.0 数据线，速度会降至约 20MB/s。";
-            [alert addButtonWithTitle:@"知道了"];
-            [alert runModal];
-        } @catch (NSException *exception) {
-            HSLogUSBDiagnostic(@"event=SUPERSPEED_LINK_WARNING_FAILED exception=%@", exception);
-        }
-    });
 }
 
 static id HSSendUSBHandshake(id self, SEL _cmd, int timeout) {
@@ -1253,7 +1221,7 @@ static id HSSendUSBHandshake(id self, SEL _cmd, int timeout) {
                            (CFAbsoluteTimeGetCurrent() - startedAt) * 1000.0,
                            result != nil,
                            result ? NSStringFromClass([result class]) : @"<nil>",
-                           result ?: @"<nil>",
+                           ([result isKindOfClass:NSString.class] && [result hasPrefix:@"err:"]) ? result : (result ? @"<response-present>" : @"<nil>"),
                            HSUSBDeviceStateDescription(self));
         HSWarnSuperSpeedLinkIfNeeded(self, result);
         return result;
@@ -1591,6 +1559,7 @@ __attribute__((constructor))
 static void HSPhotoLibraryAsyncPatchEntry(void) {
     HSInstallLegacyReporterGuards(NO);
     HSInstallUSBHandshakePatch();
+    HSInstallUSBTransportDiagnostics();
     HSInstallDeviceManagerPatch();
     HSInstallPhotoSyncPromptDiagnostics();
 
