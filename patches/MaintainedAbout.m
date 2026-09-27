@@ -3,7 +3,15 @@
 
 static NSString *const HSProjectURLString = @"https://github.com/rianlu/handshaker-mac-maintained";
 static NSWindow *HSLicenseWindow;
+static NSWindow *HSDownloadWindow;
 static BOOL HSUpdateCheckInFlight;
+
+@interface HSUpdateDownload : NSObject <NSURLSessionDownloadDelegate>
+@property(nonatomic, copy) NSString *version;
+@property(nonatomic, strong) NSURLSession *session;
+@property(nonatomic, strong) NSProgressIndicator *progress;
+@property(nonatomic, strong) NSTextField *label;
+@end
 
 static NSString *HSBundleString(NSString *key) {
     id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:key];
@@ -83,47 +91,111 @@ static NSString *HSPlainTextFromHTML(NSString *html) {
             stringByReplacingOccurrencesOfString:@"&gt;" withString:@">"];
 }
 
+static void HSCloseDownloadWindow(void) {
+    [HSDownloadWindow close];
+    HSDownloadWindow = nil;
+}
+
 static void HSFinishDownload(NSURL *fileURL, NSString *version, NSError *error) {
     HSUpdateCheckInFlight = NO;
+    HSCloseDownloadWindow();
+    NSAlert *alert = [[NSAlert alloc] init];
     if (error || !fileURL) {
-        NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"更新下载失败";
         alert.informativeText = error.localizedDescription ?: @"请稍后再试。";
         [alert runModal];
         return;
     }
     [[NSWorkspace sharedWorkspace] openURL:fileURL];
-    NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = [NSString stringWithFormat:@"已下载 %@", version];
     alert.informativeText = @"安装包已打开。请将 HandShaker 拖入“应用程序”文件夹并替换当前版本，然后重新打开。";
     [alert runModal];
 }
 
+@implementation HSUpdateDownload
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task didWriteData:(int64_t)bytesWritten totalBytesWritten:(int64_t)totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (totalBytesExpectedToWrite > 0) {
+            self.progress.indeterminate = NO;
+            self.progress.maxValue = totalBytesExpectedToWrite;
+            self.progress.doubleValue = totalBytesWritten;
+            self.label.stringValue = [NSString stringWithFormat:@"正在下载 %@，已完成 %.0f%%", self.version, 100.0 * totalBytesWritten / totalBytesExpectedToWrite];
+        }
+    });
+}
+
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task didFinishDownloadingToURL:(NSURL *)location {
+    NSError *failure = nil;
+    NSURL *saved = nil;
+    NSInteger status = [(NSHTTPURLResponse *)task.response statusCode];
+    if (status >= 400) {
+        failure = [NSError errorWithDomain:NSURLErrorDomain code:status userInfo:@{NSLocalizedDescriptionKey: @"下载更新失败。"}];
+    } else {
+        NSString *name = task.originalRequest.URL.lastPathComponent.length ? task.originalRequest.URL.lastPathComponent : @"HandShaker.dmg";
+        NSURL *destination = [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:[@"Downloads/" stringByAppendingPathComponent:name]]];
+        [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
+        if ([[NSFileManager defaultManager] moveItemAtURL:location toURL:destination error:&failure]) {
+            saved = destination;
+        }
+    }
+    NSString *version = self.version;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [session finishTasksAndInvalidate];
+        HSFinishDownload(saved, version, failure);
+    });
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    if (!error) {
+        return;
+    }
+    NSString *version = self.version;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [session finishTasksAndInvalidate];
+        HSFinishDownload(nil, version, error);
+    });
+}
+@end
+
+static HSUpdateDownload *HSActiveDownload;
+
+static void HSShowDownloadWindow(NSString *version) {
+    NSTextField *label = [NSTextField labelWithString:[NSString stringWithFormat:@"正在下载 %@…", version]];
+    label.frame = NSMakeRect(20, 58, 360, 40);
+    NSProgressIndicator *progress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(20, 24, 360, 20)];
+    progress.indeterminate = YES;
+    progress.style = NSProgressIndicatorStyleBar;
+    [progress startAnimation:nil];
+    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 400, 110)];
+    [content addSubview:label];
+    [content addSubview:progress];
+    HSDownloadWindow = [[NSWindow alloc] initWithContentRect:content.frame
+                                                     styleMask:NSWindowStyleMaskTitled
+                                                       backing:NSBackingStoreBuffered
+                                                         defer:NO];
+    HSDownloadWindow.title = @"正在下载更新";
+    HSDownloadWindow.contentView = content;
+    HSDownloadWindow.releasedWhenClosed = NO;
+    [HSDownloadWindow center];
+    [HSDownloadWindow makeKeyAndOrderFront:nil];
+    HSActiveDownload.label = label;
+    HSActiveDownload.progress = progress;
+}
+
 static void HSDownloadAndOpen(NSURL *url, NSString *version) {
-    NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-        NSURL *saved = nil;
-        NSError *failure = error;
-        NSInteger status = [(NSHTTPURLResponse *)response statusCode];
-        if (!failure && status >= 400) {
-            failure = [NSError errorWithDomain:NSURLErrorDomain code:status userInfo:@{NSLocalizedDescriptionKey: @"下载更新失败。"}];
-        }
-        if (!failure && location) {
-            NSString *name = url.lastPathComponent.length ? url.lastPathComponent : @"HandShaker.dmg";
-            NSURL *destination = [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:[@"Downloads/" stringByAppendingPathComponent:name]]];
-            [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
-            if ([[NSFileManager defaultManager] moveItemAtURL:location toURL:destination error:&failure]) {
-                saved = destination;
-            }
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            HSFinishDownload(saved, version, failure);
-        });
-    }];
-    [task resume];
+    HSActiveDownload = [HSUpdateDownload new];
+    HSActiveDownload.version = version;
+    HSShowDownloadWindow(version);
+    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+    HSActiveDownload.session = [NSURLSession sessionWithConfiguration:configuration delegate:HSActiveDownload delegateQueue:nil];
+    [[HSActiveDownload.session downloadTaskWithURL:url] resume];
 }
 
 static void HSCheckForMaintainedUpdate(BOOL interactive) {
     if (HSUpdateCheckInFlight) {
+        if (HSDownloadWindow) {
+            [HSDownloadWindow makeKeyAndOrderFront:nil];
+        }
         return;
     }
     HSUpdateCheckInFlight = YES;
