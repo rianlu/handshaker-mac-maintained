@@ -48,6 +48,7 @@ clang \
   -fobjc-arc \
   "$patch_src" \
   "$script_dir/USBTransportDiagnostics.m" \
+  "$script_dir/MaintainedAbout.m" \
   -o "$tmp_bin" \
   -install_name "$patch_install_name" \
   -current_version 1.0 \
