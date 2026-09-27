@@ -22,11 +22,11 @@
         <p>已知问题：部分手机通过 USB 连接时，仍可能无法连上，或连上后断开、电脑端不显示设备。</p>
       ]]></description>
       <enclosure
-        url="https://github.com/rianlu/handshaker-mac-maintained/releases/download/v2.5.6-r3/handshaker-mac-maintained-2.5.6-r3-x86_64.dmg"
+        url="https://github.com/rianlu/handshaker-mac-maintained/releases/download/v2.5.6-r3/handshaker-mac-maintained-2.5.6-r3-x86_64.zip"
         sparkle:version="427"
         sparkle:shortVersionString="2.5.6-r3"
-        sparkle:dsaSignature="MC4CFQCIJJEaGj2tBNXYD8uvG1SdRTQxEgIVAKKfxiyQaz0+FbWhuMZO0iTEPpfZ"
-        length="20775511"
+        sparkle:dsaSignature="MCwCFCn3HkKUeBjtG9eqavTg3rMIyjhmAhRZl2R4ASLHNJKCli8aVxlw3tisXg=="
+        length="20683098"
         type="application/octet-stream"/>
     </item>
   </channel>
