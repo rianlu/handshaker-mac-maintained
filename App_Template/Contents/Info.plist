@@ -62,7 +62,9 @@
 	<key>NSPrincipalClass</key>
 	<string>SFApplication</string>
 	<key>SUFeedURL</key>
-	<string>https://sf.smartisan.com/update.plist</string>
+	<string>https://raw.githubusercontent.com/rianlu/handshaker-mac-maintained/main/appcast.xml</string>
+	<key>SUPublicDSAKey</key>
+	<string>MIIBtzCCASsGByqGSM44BAEwggEeAoGBAJuHIKjbu8EPeqtOS7pW4hDJO7RosKBsfoNAzCAviq2zyBx0TBnjhQ8ZF6YHIUqlPm++BHZK7IKTswmdJIkoZVRJnSBTdVJyB0gcRqMxTNSLZI2YsM4NfZLpnlfemLfpUiihaivfqsRiEUAD2Gr5H2iUmu0rHz3zM8SaFjk+lo0PAhUArIsvUQMX0fOAv6MQmo1Jl+1mJjMCgYBTFlztZWrZqPZT86/I3S4z/dOoddFmjh9vrmpXHjhoc3uX6QqmVUbw8cKF3eABNm6xO35xSf0lc9ieNXKDrbY8WRNo/kFFZ1/DVkjuDIAgSW1jjTPYCaIKvdKhCGCrCtwpCLNdYY9u2By0a3y0Fo00omOIycnRkYq53iMi8fxMFAOBhQACgYEAgr7P+sfF+kNrt6nxNRWD3zDTJCYS2ByHNy8NNpbovEbf9qTPQjjbQ6Szk4vYjRJoXTcQosgunfon5j0KdmP0rGUE1Sm94R9QOL9VeE/ipCG0JVfxMVW0Jis83wlysL5WZWA8xiHj/Abb2m1ciOFczQ86+3E1zlpKFLDmoMGGWBE=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>

@@ -33,7 +33,7 @@
 
 ## 下载与使用
 
-从 [Releases](https://github.com/rianlu/handshaker-mac-maintained/releases) 下载 DMG. 最新版本见 [Latest Release](https://github.com/rianlu/handshaker-mac-maintained/releases/latest).
+从 [Releases](https://github.com/rianlu/handshaker-mac-maintained/releases) 下载 DMG. 最新版本见 [Latest Release](https://github.com/rianlu/handshaker-mac-maintained/releases/latest). 包含该功能的版本可在菜单中选择「检查更新...」，更新说明来自 GitHub Releases。
 
 1. 打开 DMG, 将 HandShaker 拖入 `/Applications`.
 2. 从"应用程序"目录启动 HandShaker.
@@ -64,7 +64,7 @@
 ./build.sh
 ```
 
-版本号统一在 `release.conf` 中维护. DMG 输出到 `build/`.
+版本号统一在 `release.conf` 中维护. DMG 输出到 `build/`. 发布时同步更新 `appcast.xml`，应用内检查更新读取的是这个文件。
 Mac 包内保留原版 `SmartFolder.apk` 作为旧 ADB 转发兼容组件. Android 主程序由用户从维护版 Releases 页面独立安装.
 
 USB 联合诊断仍单独打 ZIP, 不放进面向所有用户的 DMG. 用 `tools/build_diagnostic_bundle.sh` 组装, 操作说明见 [USB联合诊断使用说明](tools/USB联合诊断使用说明.txt). `patches/USBTransportDiagnostics.m` 只在 `HS_USB_DIAGNOSTICS=1` 时记录传输元数据, 不记录载荷.

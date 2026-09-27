@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>HandShaker</title>
+    <link>https://github.com/rianlu/handshaker-mac-maintained/releases</link>
+    <description>HandShaker Mac 维护版更新</description>
+    <language>zh-cn</language>
+    <item>
+      <title>2.5.6-r3</title>
+      <pubDate>Sun, 27 Sep 2026 17:09:59 +0000</pubDate>
+      <sparkle:minimumSystemVersion>10.10</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <p>本次更新修复启动和设置中的兼容问题，并恢复上一版暂时关闭的功能。</p>
+        <ul>
+          <li>修复启动后主窗口无法操作的问题。已去掉用户体验计划弹窗，以及第一次打开时询问是否在插上手机后自动打开。</li>
+          <li>恢复设置页面和「本地同步选项」。</li>
+          <li>优化照片图库加载和缩略图显示。相册改为在后台加载，缩略图保存在本地，再次打开时直接使用，大相册也不必每次重新整理。</li>
+          <li>支持 mov 和 m4v 视频。</li>
+          <li>修复拔掉手机时可能发生的崩溃。</li>
+          <li>手机端下载入口改为维护版发布页。</li>
+        </ul>
+        <p>已知问题：部分手机通过 USB 连接时，仍可能无法连上，或连上后断开、电脑端不显示设备。</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/rianlu/handshaker-mac-maintained/releases/download/v2.5.6-r3/handshaker-mac-maintained-2.5.6-r3-x86_64.dmg"
+        sparkle:version="427"
+        sparkle:shortVersionString="2.5.6-r3"
+        sparkle:dsaSignature="MC4CFQCIJJEaGj2tBNXYD8uvG1SdRTQxEgIVAKKfxiyQaz0+FbWhuMZO0iTEPpfZ"
+        length="20775511"
+        type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>

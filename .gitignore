@@ -8,3 +8,6 @@
 
 # Local build outputs
 build/
+
+# Sparkle update signing key. The public key is in Info.plist.
+.local/
