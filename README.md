@@ -4,7 +4,7 @@
   <p>面向现代 macOS 的 HandShaker 非官方维护版.</p>
   <p>
     <a href="https://github.com/rianlu/handshaker-mac-maintained/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/rianlu/handshaker-mac-maintained?display_name=tag"></a>
-    <img alt="macOS 15" src="https://img.shields.io/badge/macOS%2015-tested-000000">
+    <img alt="macOS 15, 27" src="https://img.shields.io/badge/macOS%2015%2C%2027-tested-000000">
     <img alt="Rosetta 2" src="https://img.shields.io/badge/Rosetta%202-required-888888">
   </p>
 </div>
@@ -23,9 +23,9 @@
 ## 功能状态
 
 - 恢复 USB 连接, 文件浏览, 图片预览和视频预览.
-- 禁用会触发卡死的"本地同步选项"旧界面.
-- 恢复设置页面, 修复系统与应用内置 `SFButton` 类名冲突.
-- 优化照片图库加载, 避免阻塞主线程.
+- 恢复设置页面和「本地同步选项」, 并修复旧界面在新系统上的加载问题.
+- 优化照片图库加载和缩略图显示, 避免阻塞主线程.
+- 支持 mov 和 m4v 视频.
 - 提供诊断脚本, 用于收集 USB, Wi-Fi, 进程和系统日志.
 - 提供 App 组装, 本地重签名和 DMG 打包流程.
 
@@ -47,6 +47,7 @@
 已实测:
 
 - macOS 15.
+- macOS 27 上可以打开.
 - Apple Silicon Mac, 通过 Rosetta 2 运行 Intel 版 HandShaker.
 
 其他 macOS 版本, Intel Mac 和不同安全策略可能存在差异.
@@ -84,7 +85,7 @@ USB 联合诊断仍单独打 ZIP, 不放进面向所有用户的 DMG. 用 `tools
 ## 已知限制
 
 - 本仓库不是原生 macOS 源码工程, 维护范围限于二进制补丁和分发流程.
-- 连接后的"本地同步选项"自动弹窗仍保持禁用, 不影响设置页面和核心传输功能.
+- 部分手机通过 USB 连接时, 仍可能无法连上, 或连上后断开、电脑端不显示设备.
 - 未购买 Apple 代码签名和公证服务, 首次运行可能出现安全提示.
 
 ## 相关项目
