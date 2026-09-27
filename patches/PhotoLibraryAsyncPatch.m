@@ -1485,6 +1485,25 @@ static void HSZeroExceptionHandlerMasks(void) {
     }
 }
 
+static void HSSuppressPhoneAutoLaunchPrompt(void) {
+    static BOOL done = NO;
+    if (done) {
+        return;
+    }
+    done = YES;
+
+    // firstLaunchAt 必须真正写入。registerDefaults 对 objectForKey: 无效，弹窗仍会出现。
+    // launchAtLogin 只控制已移除的 HandShakerAgent，不影响照片同步或闪念胶囊。
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if (![defaults objectForKey:@"firstLaunchAt"]) {
+        [defaults setObject:[NSDate date] forKey:@"firstLaunchAt"];
+    }
+    if ([defaults boolForKey:@"launchAtLogin"]) {
+        [defaults setBool:NO forKey:@"launchAtLogin"];
+    }
+    NSLog(@"[HandShakerMaintained] Phone auto-launch prompt suppressed");
+}
+
 static void HSInstallLegacyReporterGuards(BOOL zeroExistingMasks) {
     @try {
         if (!HSRegisteredLegacyPromptDefaults) {
@@ -1557,6 +1576,7 @@ static void HSScheduleLegacyReporterTeardown(void) {
 
 __attribute__((constructor))
 static void HSPhotoLibraryAsyncPatchEntry(void) {
+    HSSuppressPhoneAutoLaunchPrompt();
     HSInstallLegacyReporterGuards(NO);
     HSInstallUSBHandshakePatch();
     HSInstallUSBTransportDiagnostics();
