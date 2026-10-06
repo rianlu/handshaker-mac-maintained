@@ -6,6 +6,24 @@
     <description>HandShaker Mac 维护版更新</description>
     <language>zh-cn</language>
     <item>
+      <title>2.5.6-r4</title>
+      <pubDate>Tue, 06 Oct 2026 12:36:38 +0000</pubDate>
+      <sparkle:minimumSystemVersion>10.10</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <p>本次更新修复 Intel 电脑上启动后转彩虹球、无法操作的问题。感谢 <a href="https://github.com/strange2000">strange2000</a> 在 <a href="https://github.com/rianlu/handshaker-mac-maintained/issues/2">#2</a> 里定位原因并验证修法。</p>
+        <ul>
+          <li>修复 Intel Mac 上打开软件后一两秒即卡死的问题。探测 USB 设备是否为 Android 配件时，不再无限等待；对方没有回应时，最多等 2 秒后继续运行。</li>
+        </ul>
+        <p>已知问题：部分手机通过 USB 连接时，仍可能无法连上，或连上后断开、电脑端不显示设备。</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/rianlu/handshaker-mac-maintained/releases/download/v2.5.6-r4/handshaker-mac-maintained-2.5.6-r4-x86_64.dmg"
+        sparkle:version="428"
+        sparkle:shortVersionString="2.5.6-r4"
+        length="20788452"
+        type="application/octet-stream"/>
+    </item>
+    <item>
       <title>2.5.6-r3</title>
       <pubDate>Sun, 27 Sep 2026 17:09:59 +0000</pubDate>
       <sparkle:minimumSystemVersion>10.10</sparkle:minimumSystemVersion>
