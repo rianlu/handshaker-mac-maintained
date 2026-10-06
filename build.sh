@@ -151,12 +151,38 @@ restore_bytes(0x3a077, pack('H*', 'c3'), pack('H*', '55'), 'photo sync window op
 PERL
 }
 
+patch_aoa_control_timeouts() {
+  local core="${BUILD_DIR}/HandShaker.app/Contents/Frameworks/SmartFinderCore.framework/Versions/A/SmartFinderCore"
+
+  require_file "${core}"
+  CORE_PATH="${core}" python3 - <<'PY' || fail "failed to set AOA control transfer timeouts"
+import os
+path = os.environ["CORE_PATH"]
+# c7 44 24 08 imm32  is the timeout argument of libusb_control_transfer.
+sites = (0x74B4E, 0x74F9B, 0x75081, 0x81AE7, 0x81E69, 0x8441B)
+old = bytes.fromhex("c744240800000000")
+new = bytes.fromhex("c7442408d0070000")  # 2000 ms
+with open(path, "rb") as handle:
+    data = bytearray(handle.read())
+for offset in sites:
+    current = bytes(data[offset:offset + 8])
+    if current == new:
+        continue
+    if current != old:
+        raise SystemExit(f"unexpected bytes at {offset:#x}: {current.hex()}")
+    data[offset:offset + 8] = new
+with open(path, "wb") as handle:
+    handle.write(data)
+PY
+}
+
 load_release_config
 
 require_command codesign
 require_command create-dmg
 require_command lipo
 require_command perl
+require_command python3
 
 if [ -f "${SMARTFINDER_CORE_PATCH_SCRIPT}" ]; then
   echo "🧩 正在应用 SmartFinderCore 运行时补丁..."
@@ -183,6 +209,10 @@ restore_photo_sync_prompt
 # 2.2 注入版本信息
 echo "🏷️ 正在应用维护版版本号..."
 apply_release_version
+
+# 2.3 AOA 探测的 control transfer 超时为 0 时，主线程会永久卡住。
+echo "⏱️ 正在给 AOA 探测设置超时..."
+patch_aoa_control_timeouts
 
 # 3. 重新签名
 echo "🔐 正在进行本地重签名..."
