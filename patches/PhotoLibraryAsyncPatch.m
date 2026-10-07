@@ -108,6 +108,8 @@ static BOOL HSSwizzledUSBHandshake = NO;
 static BOOL HSSwizzledDeviceManagerCallbacks = NO;
 static IMP HSOriginalDeviceAdded = NULL;
 static IMP HSOriginalDeviceRemoved = NULL;
+static IMP HSOriginalProcessArrivedDevice = NULL;
+static BOOL HSSwizzledProcessArrivedDevice = NO;
 static BOOL HSSwizzledPreferences = NO;
 static BOOL HSSwizzledPhotoSyncPromptDiagnostics = NO;
 static BOOL HSSwizzledVideoAllowedFileTypes = NO;
@@ -1271,6 +1273,174 @@ static void HSDeviceManagerMatchingAdded(id self, SEL _cmd, void *argument) {
     }
 }
 
+struct HSLibusbEndpointDescriptor {
+    uint8_t bLength;
+    uint8_t bDescriptorType;
+    uint8_t bEndpointAddress;
+    uint8_t bmAttributes;
+    uint16_t wMaxPacketSize;
+    uint8_t bInterval;
+    uint8_t bRefresh;
+    uint8_t bSynchAddress;
+    const unsigned char *extra;
+    int extra_length;
+};
+
+struct HSLibusbInterfaceDescriptor {
+    uint8_t bLength;
+    uint8_t bDescriptorType;
+    uint8_t bInterfaceNumber;
+    uint8_t bAlternateSetting;
+    uint8_t bNumEndpoints;
+    uint8_t bInterfaceClass;
+    uint8_t bInterfaceSubClass;
+    uint8_t bInterfaceProtocol;
+    uint8_t iInterface;
+    const struct HSLibusbEndpointDescriptor *endpoint;
+    const unsigned char *extra;
+    int extra_length;
+};
+
+struct HSLibusbInterface {
+    const struct HSLibusbInterfaceDescriptor *altsetting;
+    int num_altsetting;
+};
+
+struct HSLibusbConfigDescriptor {
+    uint8_t bLength;
+    uint8_t bDescriptorType;
+    uint16_t wTotalLength;
+    uint8_t bNumInterfaces;
+    uint8_t bConfigurationValue;
+    uint8_t iConfiguration;
+    uint8_t bmAttributes;
+    uint8_t bMaxPower;
+    const struct HSLibusbInterface *interface;
+    const unsigned char *extra;
+    int extra_length;
+};
+
+struct HSLibusbDeviceDescriptor {
+    uint8_t bLength;
+    uint8_t bDescriptorType;
+    uint16_t bcdUSB;
+    uint8_t bDeviceClass;
+    uint8_t bDeviceSubClass;
+    uint8_t bDeviceProtocol;
+    uint8_t bMaxPacketSize0;
+    uint16_t idVendor;
+    uint16_t idProduct;
+    uint16_t bcdDevice;
+    uint8_t iManufacturer;
+    uint8_t iProduct;
+    uint8_t iSerialNumber;
+    uint8_t bNumConfigurations;
+};
+
+typedef int (*HSLibusbGetDeviceDescriptorIMP)(void *device, struct HSLibusbDeviceDescriptor *descriptor);
+typedef int (*HSLibusbGetConfigDescriptorIMP)(void *device, uint8_t index, struct HSLibusbConfigDescriptor **config);
+typedef void (*HSLibusbFreeConfigDescriptorIMP)(struct HSLibusbConfigDescriptor *config);
+typedef void (*HSProcessArrivedDeviceIMP)(id, SEL, void *);
+
+static BOOL HSUSBClassIsNonPhone(uint8_t deviceOrInterfaceClass) {
+    switch (deviceOrInterfaceClass) {
+        case 0x01: // audio
+        case 0x03: // HID: mouse, keyboard
+        case 0x07: // printer
+        case 0x08: // mass storage
+        case 0x09: // hub
+        case 0x0E: // video
+        case 0xE0: // wireless controller, including bluetooth adapters
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+static BOOL HSUSBInterfacesAreAllNonPhone(void *device, uint8_t numConfigurations) {
+    HSLibusbGetConfigDescriptorIMP getConfig = (HSLibusbGetConfigDescriptorIMP)dlsym(RTLD_DEFAULT, "libusb_get_config_descriptor");
+    HSLibusbFreeConfigDescriptorIMP freeConfig = (HSLibusbFreeConfigDescriptorIMP)dlsym(RTLD_DEFAULT, "libusb_free_config_descriptor");
+    if (!getConfig || !freeConfig || numConfigurations == 0 || numConfigurations > 8) {
+        return NO;
+    }
+
+    BOOL sawInterface = NO;
+    for (uint8_t index = 0; index < numConfigurations; index += 1) {
+        struct HSLibusbConfigDescriptor *config = NULL;
+        if (getConfig(device, index, &config) != 0 || !config || (config->bNumInterfaces > 0 && !config->interface)) {
+            if (config) {
+                freeConfig(config);
+            }
+            return NO;
+        }
+
+        BOOL onlyNonPhone = YES;
+        for (uint8_t interfaceIndex = 0; interfaceIndex < config->bNumInterfaces; interfaceIndex += 1) {
+            const struct HSLibusbInterface *interface = &config->interface[interfaceIndex];
+            if (!interface->altsetting || interface->num_altsetting <= 0) {
+                onlyNonPhone = NO;
+                break;
+            }
+            sawInterface = YES;
+            for (int altIndex = 0; altIndex < interface->num_altsetting; altIndex += 1) {
+                if (!HSUSBClassIsNonPhone(interface->altsetting[altIndex].bInterfaceClass)) {
+                    onlyNonPhone = NO;
+                    break;
+                }
+            }
+            if (!onlyNonPhone) {
+                break;
+            }
+        }
+        freeConfig(config);
+        if (!onlyNonPhone) {
+            return NO;
+        }
+    }
+    // 仅充电常常没有任何数据接口。没有接口时继续探测，避免漏掉还能走 AOA 的手机。
+    return sawInterface;
+}
+
+static BOOL HSUSBDeviceShouldSkipAOAProbe(void *device) {
+    if (!device) {
+        return NO;
+    }
+
+    HSLibusbGetDeviceDescriptorIMP getDescriptor = (HSLibusbGetDeviceDescriptorIMP)dlsym(RTLD_DEFAULT, "libusb_get_device_descriptor");
+    if (!getDescriptor) {
+        return NO;
+    }
+
+    struct HSLibusbDeviceDescriptor descriptor;
+    memset(&descriptor, 0, sizeof(descriptor));
+    if (getDescriptor(device, &descriptor) != 0) {
+        return NO;
+    }
+
+    BOOL deviceClassSkip = HSUSBClassIsNonPhone(descriptor.bDeviceClass);
+    BOOL interfaceSkip = !deviceClassSkip && descriptor.bDeviceClass == 0x00 &&
+        HSUSBInterfacesAreAllNonPhone(device, descriptor.bNumConfigurations);
+    if (!deviceClassSkip && !interfaceSkip) {
+        return NO;
+    }
+
+    HSLogUSBDiagnostic(@"event=AOA_PROBE_SKIP vid=0x%04x pid=0x%04x deviceClass=0x%02x reason=%s",
+                       descriptor.idVendor,
+                       descriptor.idProduct,
+                       descriptor.bDeviceClass,
+                       deviceClassSkip ? "device-class" : "interface-class");
+    return YES;
+}
+
+static void HSProcessArrivedDevice(id self, SEL _cmd, void *device) {
+    if (HSUSBDeviceShouldSkipAOAProbe(device)) {
+        return;
+    }
+    if (HSOriginalProcessArrivedDevice) {
+        ((HSProcessArrivedDeviceIMP)HSOriginalProcessArrivedDevice)(self, _cmd, device);
+    }
+}
+
 static void HSDeviceManagerMatchingRemoved(id self, SEL _cmd, void *argument) {
     // matchingDeviceRemoved: 的实参为非对象指针 (实测 0x4d555478 野指针).
     // 参数必须声明为 void *: 若声明为 id, ARC 会在函数序言插入 objc_storeStrong
@@ -1292,6 +1462,21 @@ static void HSInstallDeviceManagerPatch(void) {
     // 原方法在 7-9 用户日志中确认存在且被调用: -[SFUSBDeviceManager matchingDeviceAdded:]_block_invoke
     // 与 -[SFUSBDeviceManager matchingDeviceRemoved:]. 这里对两个外层方法挂钩获得持久化日志,
     // 弥补 AOA 就绪到握手开始之间的空窗期.
+    if (!HSSwizzledProcessArrivedDevice) {
+        SEL arrivedSelector = NSSelectorFromString(@"processArrivedDevice:");
+        Method arrivedMethod = class_getInstanceMethod(managerClass, arrivedSelector);
+        const char *arrivedTypes = arrivedMethod ? method_getTypeEncoding(arrivedMethod) : NULL;
+        if (arrivedTypes && strncmp(arrivedTypes, "v24@0:8^", 8) == 0) {
+            HSSwizzledProcessArrivedDevice = HSSwizzleInstanceMethodOnce(managerClass,
+                                                                         arrivedSelector,
+                                                                         (IMP)HSProcessArrivedDevice,
+                                                                         &HSOriginalProcessArrivedDevice);
+        }
+        HSLogUSBDiagnostic(@"event=AOA_SKIP_PATCH installed=%d types=%s",
+                           HSSwizzledProcessArrivedDevice,
+                           arrivedTypes ?: "<nil>");
+    }
+
     if (!HSSwizzledDeviceManagerCallbacks) {
         HSSwizzleInstanceMethodOnce(managerClass,
                                     NSSelectorFromString(@"matchingDeviceAdded:"),

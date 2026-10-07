@@ -6,6 +6,26 @@
     <description>HandShaker Mac 维护版更新</description>
     <language>zh-cn</language>
     <item>
+      <title>2.5.6-r5</title>
+      <pubDate>Wed, 07 Oct 2026 16:33:35 +0000</pubDate>
+      <sparkle:minimumSystemVersion>10.10</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <p>本次更新缩短外设较多时的启动停顿。感谢 <a href="https://github.com/strange2000">strange2000</a> 在 <a href="https://github.com/rianlu/handshaker-mac-maintained/issues/2">#2</a> 里继续补充测试。</p>
+        <ul>
+          <li>打开软件时，集线器、鼠标、键盘、读卡器、摄像头、蓝牙适配器、音频设备和打印机不再做 Android 配件探测。这些设备不回应时，以前每台会占住界面最多 2 秒。</li>
+          <li>手机仍会探测，包括仅充电，以及之后切换成文件传输、传照片、网络共享或 USB 调试。插在扩展坞上的手机同样继续探测。</li>
+          <li>沿用上一版：探测没有回应时最多等 2 秒，避免 Intel Mac 上永久卡死。</li>
+        </ul>
+        <p>已知问题：部分手机通过 USB 连接时，仍可能无法连上，或连上后断开、电脑端不显示设备。</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/rianlu/handshaker-mac-maintained/releases/download/v2.5.6-r5/handshaker-mac-maintained-2.5.6-r5-x86_64.dmg"
+        sparkle:version="429"
+        sparkle:shortVersionString="2.5.6-r5"
+        length="20789265"
+        type="application/octet-stream"/>
+    </item>
+    <item>
       <title>2.5.6-r4</title>
       <pubDate>Tue, 06 Oct 2026 12:36:38 +0000</pubDate>
       <sparkle:minimumSystemVersion>10.10</sparkle:minimumSystemVersion>
