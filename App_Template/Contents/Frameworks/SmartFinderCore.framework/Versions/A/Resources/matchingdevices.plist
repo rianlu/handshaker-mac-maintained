@@ -186,19 +186,6 @@
         </dict>
         <dict>
             <key>deviceName</key>
-            <string>INTEL</string>
-            <key>matchingDictionary</key>
-            <dict>
-                <key>IOProviderClass</key>
-                <string>IOUSBDevice</string>
-                <key>idVendor</key>
-                <real>32903</real>
-                <key>idProduct</key>
-                <string>*</string>
-            </dict>
-        </dict>
-        <dict>
-            <key>deviceName</key>
             <string>K_TOUCH</string>
             <key>matchingDictionary</key>
             <dict>

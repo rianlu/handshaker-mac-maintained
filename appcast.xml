@@ -6,6 +6,25 @@
     <description>HandShaker Mac 维护版更新</description>
     <language>zh-cn</language>
     <item>
+      <title>2.5.6-r6</title>
+      <pubDate>Fri, 09 Oct 2026 16:17:43 +0000</pubDate>
+      <sparkle:minimumSystemVersion>10.10</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <p>本次更新修复打开软件后系统蓝牙掉线、必须重启电脑才能恢复的问题。感谢 <a href="https://github.com/strange2000">strange2000</a> 在 <a href="https://github.com/rianlu/handshaker-mac-maintained/issues/6">#6</a> 和 <a href="https://github.com/rianlu/handshaker-mac-maintained/issues/7">#7</a> 里的反馈。</p>
+        <ul>
+          <li>不再把 Intel 的 USB 厂商号 0x8087 当作手机。这个号也用在电脑的 Intel 蓝牙上，打开它会挤掉系统蓝牙驱动。</li>
+          <li>沿用上一版：鼠标、读卡器、摄像头等外设不再做配件探测；探测没有回应时最多等 2 秒。</li>
+        </ul>
+        <p>已知问题：部分手机通过 USB 连接时，仍可能无法连上，或连上后断开、电脑端不显示设备。</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/rianlu/handshaker-mac-maintained/releases/download/v2.5.6-r6/handshaker-mac-maintained-2.5.6-r6-x86_64.dmg"
+        sparkle:version="430"
+        sparkle:shortVersionString="2.5.6-r6"
+        length="20789276"
+        type="application/octet-stream"/>
+    </item>
+    <item>
       <title>2.5.6-r5</title>
       <pubDate>Wed, 07 Oct 2026 16:33:35 +0000</pubDate>
       <sparkle:minimumSystemVersion>10.10</sparkle:minimumSystemVersion>
